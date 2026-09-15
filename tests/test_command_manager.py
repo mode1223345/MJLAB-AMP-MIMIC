@@ -9,7 +9,7 @@ from conftest import get_test_device
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
-from mjlab.tasks.cartpole.cartpole_env_cfg import cartpole_balance_env_cfg
+from mjlab.tasks.registry import load_env_cfg
 from mjlab.tasks.tracking.mdp.commands import MotionCommand
 
 
@@ -52,9 +52,9 @@ class CounterCommandCfg(CommandTermCfg):
 
 @pytest.fixture
 def counter_env(device):
-  cfg = cartpole_balance_env_cfg()
+  cfg = load_env_cfg("Mjlab-Velocity-Flat-Unitree-G1", play=True)
   cfg.scene.num_envs = 4
-  cfg.commands = {"counter": CounterCommandCfg()}
+  cfg.commands["counter"] = CounterCommandCfg()
   env = ManagerBasedRlEnv(cfg=cfg, device=device)
   yield env
   env.close()
@@ -69,7 +69,9 @@ def test_partial_reset_does_not_advance_other_envs(counter_env):
   env.reset()
   assert term.ticks.tolist() == [1, 1, 1, 1]
 
-  action = torch.zeros((env.num_envs, 1), device=env.device)
+  action = torch.zeros(
+    (env.num_envs, env.action_manager.total_action_dim), device=env.device
+  )
   env.step(action)
   assert term.ticks.tolist() == [2, 2, 2, 2]
 

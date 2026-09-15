@@ -2,13 +2,13 @@
 
 # mjlab
 
-[![GitHub Actions](https://img.shields.io/github/actions/workflow/status/mujocolab/mjlab/ci.yml?branch=main)](https://github.com/mujocolab/mjlab/actions/workflows/ci.yml?query=branch%3Amain)
-[![Documentation](https://github.com/mujocolab/mjlab/actions/workflows/docs.yml/badge.svg)](https://mujocolab.github.io/mjlab/)
 [![License](https://img.shields.io/github/license/mujocolab/mjlab)](https://github.com/mujocolab/mjlab/blob/main/LICENSE)
-[![MuJoCo Warp](https://img.shields.io/badge/MuJoCo_Warp-3.11.0-blue)](https://github.com/google-deepmind/mujoco_warp/releases/tag/v3.11.0)
-[![Nightly Benchmarks](https://img.shields.io/badge/Nightly-Benchmarks-blue)](https://mujocolab.github.io/mjlab/nightly/)
-[![PyPI](https://img.shields.io/pypi/v/mjlab)](https://pypi.org/project/mjlab/)
-[![PyPI downloads](https://img.shields.io/pypi/dm/mjlab?color=blue)](https://pypistats.org/packages/mjlab)
+[![MuJoCo Warp](https://img.shields.io/badge/MuJoCo_Warp-3.10.0.3-blue)](https://github.com/google-deepmind/mujoco_warp/releases/tag/v3.10.0.3)
+
+Internal Noetix fork of mjlab v1.5.3, scoped to N3 (0905) AMP + HIM
+locomotion training; the upstream G1 tasks are kept as a reference
+baseline. Other company robot tasks live in the git history under the
+`refactor-baseline` tag. Upstream docs: https://mujocolab.github.io/mjlab/
 
 mjlab combines [Isaac Lab](https://github.com/isaac-sim/IsaacLab)'s manager-based API with [MuJoCo Warp](https://github.com/google-deepmind/mujoco_warp), a GPU-accelerated version of [MuJoCo](https://github.com/google-deepmind/mujoco).
 The framework provides composable building blocks for environment design,
@@ -26,8 +26,6 @@ Run the demo (no installation needed):
 uvx --from mjlab --refresh demo
 ```
 
-Or try in [Google Colab](https://colab.research.google.com/github/mujocolab/mjlab/blob/main/notebooks/demo.ipynb) (no local setup required).
-
 **Install from source:**
 
 ```bash
@@ -35,7 +33,6 @@ git clone https://github.com/mujocolab/mjlab.git && cd mjlab
 uv run demo
 ```
 
-For alternative installation methods (PyPI, Docker), see the [Installation Guide](https://mujocolab.github.io/mjlab/main/source/installation.html).
 
 ## Training Examples
 
@@ -55,7 +52,6 @@ uv run train Mjlab-Velocity-Flat-Unitree-G1 \
   --env.scene.num-envs 4096
 ```
 
-See the [Distributed Training guide](https://mujocolab.github.io/mjlab/main/source/training/distributed_training.html) for details.
 
 Evaluate a policy while training (fetches latest checkpoint from Weights & Biases):
 
@@ -65,7 +61,7 @@ uv run play Mjlab-Velocity-Flat-Unitree-G1 --wandb-run-path your-org/mjlab/run-i
 
 ### 2. Motion Imitation
 
-Train a humanoid to mimic reference motions. See the [motion imitation guide](https://mujocolab.github.io/mjlab/main/source/training/motion_imitation.html) for preprocessing setup.
+Train a humanoid to mimic reference motions.
 
 ```bash
 uv run train Mjlab-Tracking-Flat-Unitree-G1 --registry-name your-org/motions/motion-name --env.scene.num-envs 4096
@@ -84,10 +80,6 @@ uv run play Mjlab-Your-Task-Id --agent random  # Sends uniform random actions
 When running motion-tracking tasks, add `--registry-name your-org/motions/motion-name` to the command.
 
 
-## Documentation
-
-Full documentation is available at **[mujocolab.github.io/mjlab](https://mujocolab.github.io/mjlab/)**.
-
 ## Development
 
 ```bash
@@ -103,7 +95,7 @@ For development setup: `uvx pre-commit install`
 
 mjlab is used in published research and open-source robotics projects. See the [Research](https://mujocolab.github.io/mjlab/main/source/research.html) page for publications and projects, or share your own in [Show and Tell](https://github.com/mujocolab/mjlab/discussions/categories/show-and-tell).
 
-If you use mjlab in your research, please consider citing:
+If you use upstream mjlab in your research, please consider citing:
 
 ```bibtex
 @misc{zakka2026mjlablightweightframeworkgpuaccelerated,

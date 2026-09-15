@@ -17,3 +17,7 @@ benchmark_results/
 # Documentation outputs.
 **/_build/*
 **/generated/*
+
+# Local tooling caches.
+.pytest_cache/
+.ruff_cache/

@@ -26,10 +26,17 @@ from mjlab.viewer.base import (
   VerbosityLevel,
   ViewerAction,
 )
+from mjlab.viewer.viser.foot_friction_panel import (
+  FootFrictionPanel,
+  _matched_geom_names,
+)
+from mjlab.viewer.viser.head_mass_panel import HeadMassPanel, resolve_mass_body_name
 from mjlab.viewer.viser.overlays import (
   ViserCameraOverlays,
   ViserContactOverlays,
   ViserDebugOverlays,
+  ViserForceOverlays,
+  ViserJointOverlays,
   ViserTermOverlays,
 )
 from mjlab.viewer.viser.scene import MjlabViserScene
@@ -79,6 +86,10 @@ class ViserPlayViewer(BaseViewer):
     self._camera_overlays: ViserCameraOverlays | None = None
     self._debug_overlays: ViserDebugOverlays | None = None
     self._contact_overlays: ViserContactOverlays | None = None
+    self._force_overlays: ViserForceOverlays | None = None
+    self._joint_overlays: ViserJointOverlays | None = None
+    self._head_mass_panel: HeadMassPanel | None = None
+    self._foot_friction_panel: FootFrictionPanel | None = None
     self._sim_lock = Lock()
     self._camera_update_last_ms: float = 0.0
     self._debug_queue_last_ms: float = 0.0
@@ -87,6 +98,11 @@ class ViserPlayViewer(BaseViewer):
     self._timing_last_log_time: float = 0.0
     self._external_server = viser_server is not None
     self._server = viser_server or viser.ViserServer(label="mjlab")
+    # Wider sidebar for Rewards / Forces / Joints plots and tables.
+    self._server.gui.configure_theme(
+      control_layout="floating",
+      control_width="large",
+    )
 
   @override
   def setup(self) -> None:
@@ -176,6 +192,25 @@ class ViserPlayViewer(BaseViewer):
             request_action=self.request_action,
           )
 
+      if "robot" in env.scene.entities:
+        mass_body = resolve_mass_body_name(env)
+        if mass_body is not None:
+          self._head_mass_panel = HeadMassPanel(
+            self._server,
+            self.env,
+            get_env_idx=lambda: self._scene.env_idx,
+            request_action=self.request_action,
+            body_name=mass_body,
+          )
+        robot = env.scene.entities["robot"]
+        if _matched_geom_names(robot, (".*_foot_collision", ".*_ankle_roll_collision")):
+          self._foot_friction_panel = FootFrictionPanel(
+            self._server,
+            self.env,
+            get_env_idx=lambda: self._scene.env_idx,
+            request_action=self.request_action,
+          )
+
       # Add standard visualization options from MjlabViserScene.
       def _debug_viz_extra() -> None:
         env.command_manager.create_debug_vis_gui(
@@ -213,6 +248,10 @@ class ViserPlayViewer(BaseViewer):
     self._term_overlays.setup_tabs(tabs)
     self._debug_overlays = ViserDebugOverlays(self.env, self._scene)
     self._contact_overlays = ViserContactOverlays(self._scene)
+    self._force_overlays = ViserForceOverlays(self._server, self.env, self._scene)
+    self._force_overlays.setup_tab(tabs)
+    self._joint_overlays = ViserJointOverlays(self._server, self.env, self._scene)
+    self._joint_overlays.setup_tab(tabs)
 
     # Groups tab (geom/site/joint/tendon/actuator visibility).
     with tabs.add_tab("Groups", icon=viser.Icon.LAYERS_INTERSECT):
@@ -281,6 +320,16 @@ class ViserPlayViewer(BaseViewer):
   ) -> bool:
     if isinstance(payload, dict) and payload.get("type") == "gui_reset":
       self._handle_gui_reset(payload.get("all_envs", False))
+      return True
+    if isinstance(payload, dict) and payload.get("type") == "head_mass":
+      if self._head_mass_panel is not None:
+        with self._sim_lock:
+          self._head_mass_panel.apply(payload)
+      return True
+    if isinstance(payload, dict) and payload.get("type") == "foot_friction":
+      if self._foot_friction_panel is not None:
+        with self._sim_lock:
+          self._foot_friction_panel.apply(payload)
       return True
     if action != ViewerAction.FETCH_CHECKPOINT:
       return False
@@ -370,9 +419,18 @@ class ViserPlayViewer(BaseViewer):
         self._debug_overlays.on_env_switch()
       if self._contact_overlays:
         self._contact_overlays.on_env_switch()
+      if self._force_overlays:
+        self._force_overlays.on_env_switch()
+      if self._joint_overlays:
+        self._joint_overlays.on_env_switch()
 
     if self._term_overlays:
       self._term_overlays.update(self._is_paused)
+    if self._force_overlays:
+      # Keep values visible while paused (useful after single-step).
+      self._force_overlays.update()
+    if self._joint_overlays:
+      self._joint_overlays.update()
 
   def _update_camera_feeds(self, sim: Simulation, has_pending_updates: bool) -> None:
     """Push camera sensor frames to GUI when needed."""
@@ -533,12 +591,20 @@ class ViserPlayViewer(BaseViewer):
       super().reset_environment()
     if self._term_overlays:
       self._term_overlays.clear_histories()
+    if self._force_overlays:
+      self._force_overlays.on_env_switch()
+    if self._joint_overlays:
+      self._joint_overlays.on_env_switch()
 
   @override
   def close(self) -> None:
     """Close the viewer and cleanup resources."""
     if self._term_overlays:
       self._term_overlays.cleanup()
+    if self._force_overlays:
+      self._force_overlays.cleanup()
+    if self._joint_overlays:
+      self._joint_overlays.cleanup()
     if self._camera_overlays:
       self._camera_overlays.cleanup()
     self._threadpool.shutdown(wait=True)

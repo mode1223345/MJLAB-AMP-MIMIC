@@ -482,6 +482,9 @@ class NativeMujocoViewer(BaseViewer):
       self.request_action("TOGGLE_SHOW_ALL_ENVS")
     elif key == KEY_RIGHT:
       self.request_single_step()
+    else:
+      # Forward unused keys to command terms (e.g. AMP twist teleop).
+      self.request_action("custom", ("command_key", key))
 
     if self.user_key_callback:
       try:
@@ -496,6 +499,16 @@ class NativeMujocoViewer(BaseViewer):
         mujoco.mj_forward(self.mjm, self.mjd)
 
   def _handle_custom_action(self, action: ViewerAction, payload: object | None) -> bool:
+    if (
+      isinstance(payload, tuple)
+      and len(payload) == 2
+      and payload[0] == "command_key"
+      and isinstance(payload[1], int)
+    ):
+      cmd_mgr = getattr(self.env.unwrapped, "command_manager", None)
+      if cmd_mgr is not None and hasattr(cmd_mgr, "on_key"):
+        return bool(cmd_mgr.on_key(payload[1]))
+      return False
     del payload
     if action == ViewerAction.PREV_ENV and self.env.unwrapped.num_envs > 1:
       self.env_idx = (self.env_idx - 1) % self.env.unwrapped.num_envs

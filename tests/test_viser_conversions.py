@@ -21,7 +21,7 @@ def load_robot_model(robot_name: str) -> mujoco.MjModel:
   # Map robot names to their XML files.
   robot_paths = {
     "unitree_g1": base_path / "unitree_g1/xmls/g1.xml",
-    "unitree_go1": base_path / "unitree_go1/xmls/go1.xml",
+    "N3": base_path / "N3/xmls/N3.xml",
   }
 
   if robot_name not in robot_paths:
@@ -63,9 +63,9 @@ def test_unitree_g1_conversion():
     print("  - Found textured meshes")
 
 
-def test_unitree_go1_conversion():
-  """Test conversion with Unitree Go1 robot."""
-  model = load_robot_model("unitree_go1")
+def test_n3_conversion():
+  """Test conversion with N3 robot."""
+  model = load_robot_model("N3")
 
   mesh_geom_count = 0
   primitive_geom_count = 0
@@ -87,7 +87,7 @@ def test_unitree_go1_conversion():
       # Count primitive geometries (box, sphere, capsule, etc.).
       primitive_geom_count += 1
 
-  print(f"✓ Unitree Go1: Successfully converted {mesh_geom_count} mesh geometries")
+  print(f"✓ N3: Successfully converted {mesh_geom_count} mesh geometries")
   print(f"  - Also has {primitive_geom_count} primitive geometries")
 
 
@@ -536,7 +536,7 @@ if __name__ == "__main__":
 
   tests = [
     test_unitree_g1_conversion,
-    test_unitree_go1_conversion,
+    test_n3_conversion,
     test_texture_extraction,
     test_material_colors,
     test_performance,

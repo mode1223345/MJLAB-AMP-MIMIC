@@ -39,6 +39,8 @@ class PlayConfig:
   """Optional checkpoint name within the W&B run to load (e.g. 'model_4000.pt')."""
   checkpoint_file: str | None = None
   motion_file: str | None = None
+  amp_motion_files: list[str] | None = None
+  """Override AMP expert JSON files when they are outside the task motion directory."""
   num_envs: int | None = None
   device: str | None = None
   video: bool = False
@@ -63,6 +65,8 @@ def run_play(task_id: str, cfg: PlayConfig):
 
   env_cfg = load_env_cfg(task_id, play=True)
   agent_cfg = load_rl_cfg(task_id)
+  if cfg.amp_motion_files is not None:
+    env_cfg.amp_motion_files = list(cfg.amp_motion_files)
 
   DUMMY_MODE = cfg.agent in {"zero", "random"}
   TRAINED_MODE = not DUMMY_MODE

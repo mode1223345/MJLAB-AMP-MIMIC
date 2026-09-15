@@ -50,6 +50,7 @@ class ViserTermPlotter:
     name: str = "Reward",
     history_length: int = 150,
     env_idx: int = 0,
+    initially_enabled: list[str] | None = None,
   ) -> None:
     """Initialize the plotter.
 
@@ -59,10 +60,12 @@ class ViserTermPlotter:
       name: Name prefix for the plots (e.g. "Reward" or "Metric")
       history_length: Number of points to keep in history
       env_idx: Index of the environment being displayed
+      initially_enabled: Term names to enable (and show) on startup
     """
     self._server = server
     self._name = name
     self._history_length = history_length
+    enabled0 = set(initially_enabled or ())
 
     # Pre-allocated x-axis array (reused for all plots).
     self._x_array = np.arange(-history_length + 1, 1, dtype=np.float64)
@@ -73,6 +76,7 @@ class ViserTermPlotter:
       self._terms[tname] = _TermState(
         name=tname,
         color=_color_for(i),
+        enabled=tname in enabled0,
         history=deque(maxlen=history_length),
       )
 
@@ -86,6 +90,7 @@ class ViserTermPlotter:
     # Build all GUI elements.
     self._build_selector_gui(term_names)
     self._plots_folder = self._server.gui.add_folder("Plots", expand_by_default=True)
+    self._sync_plots()
 
   def _build_selector_gui(self, term_names: list[str]) -> None:
     """Build flat checkboxes with a filter input for term selection."""
@@ -142,7 +147,10 @@ class ViserTermPlotter:
           self._sync_plots()
 
   def _env_label_text(self) -> str:
-    return f"<small><em>Showing terms for environment #{self._env_idx}</em></small>"
+    return (
+      f'<span style="color:#444;font-size:0.85em;">'
+      f"Showing terms for environment #{self._env_idx}</span>"
+    )
 
   def update_env_idx(self, env_idx: int) -> None:
     """Update the displayed environment index."""

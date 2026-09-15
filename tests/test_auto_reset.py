@@ -7,7 +7,7 @@ from test_command_manager import CounterCommand, CounterCommandCfg
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.managers.event_manager import EventTermCfg
-from mjlab.tasks.cartpole.cartpole_env_cfg import cartpole_balance_env_cfg
+from mjlab.tasks.registry import load_env_cfg
 
 
 @pytest.fixture(scope="module")
@@ -16,8 +16,8 @@ def device():
 
 
 def _make_cfg(auto_reset: bool):
-  cfg = cartpole_balance_env_cfg()
-  cfg.episode_length_s = 0.5  # 10 steps at dt=0.05
+  cfg = load_env_cfg("Mjlab-Velocity-Flat-Unitree-G1", play=True)
+  cfg.episode_length_s = 0.5  # Short episodes so timeouts arrive fast.
   cfg.scene.num_envs = 4
   cfg.auto_reset = auto_reset
   return cfg
@@ -26,7 +26,9 @@ def _make_cfg(auto_reset: bool):
 def _step_until_done_env(env):
   """Step with zero actions until at least one env is done. Return step outputs."""
   for _ in range(env.max_episode_length + 5):
-    action = torch.zeros((env.num_envs, 1), device=env.device)
+    action = torch.zeros(
+      (env.num_envs, env.action_manager.total_action_dim), device=env.device
+    )
     result = env.step(action)
     terminated, truncated = result[2], result[3]
     if (terminated | truncated).any():
@@ -85,7 +87,9 @@ def test_auto_reset_false_explicit_reset_works(device):
   assert (env.episode_length_buf[done_ids] == 0).all()
 
   # Can continue stepping after manual reset.
-  action = torch.zeros((env.num_envs, 1), device=env.device)
+  action = torch.zeros(
+    (env.num_envs, env.action_manager.total_action_dim), device=env.device
+  )
   obs, reward, _, _, _ = env.step(action)
   assert obs is not None
   assert reward is not None
@@ -98,7 +102,9 @@ def test_auto_reset_false_requires_manual_reset_before_next_step(device):
   env.reset()
   _step_until_done_env(env)
 
-  action = torch.zeros((env.num_envs, 1), device=env.device)
+  action = torch.zeros(
+    (env.num_envs, env.action_manager.total_action_dim), device=env.device
+  )
   with pytest.raises(RuntimeError, match="must be reset via reset"):
     env.step(action)
 
@@ -125,7 +131,9 @@ def test_auto_reset_false_user_loop_pattern(device):
   episode_count = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
   last_terminal_obs: dict[str, torch.Tensor] | None = None
 
-  action = torch.zeros((env.num_envs, 1), device=env.device)
+  action = torch.zeros(
+    (env.num_envs, env.action_manager.total_action_dim), device=env.device
+  )
   for _ in range((env.max_episode_length + 2) * 3):
     obs, _, terminated, truncated, _ = env.step(action)
     done = terminated | truncated
@@ -167,21 +175,27 @@ def test_auto_reset_false_obs_differs_from_auto_reset_true(device):
     assert not torch.equal(on_val, off_val)
 
 
+# Section: partial-reset isolation (v1.6.0 semantics), adapted from upstream's
+# cartpole tests to the G1 velocity task.
+
+
 def test_partial_reset_leaves_other_envs_obs_buffers_untouched(device):
   """reset(env_ids=...) must not advance other envs' history/delay buffers."""
   cfg = _make_cfg(auto_reset=False)
-  cfg.observations["actor"].terms["cart_pos"].history_length = 4
-  cfg.observations["actor"].terms["cart_vel"].delay_min_lag = 2
-  cfg.observations["actor"].terms["cart_vel"].delay_max_lag = 2
+  cfg.observations["actor"].terms["joint_pos"].history_length = 4
+  cfg.observations["actor"].terms["joint_vel"].delay_min_lag = 2
+  cfg.observations["actor"].terms["joint_vel"].delay_max_lag = 2
   env = ManagerBasedRlEnv(cfg=cfg, device=device)
   env.reset()
-  action = torch.zeros((env.num_envs, 1), device=env.device)
+  action = torch.zeros(
+    (env.num_envs, env.action_manager.total_action_dim), device=env.device
+  )
   for _ in range(3):
     env.step(action)
 
   om = env.observation_manager
-  hist = om._group_obs_term_history_buffer["actor"]["cart_pos"]
-  delay = om._group_obs_term_delay_buffer["actor"]["cart_vel"]
+  hist = om._group_obs_term_history_buffer["actor"]["joint_pos"]
+  delay = om._group_obs_term_delay_buffer["actor"]["joint_vel"]
   h_before = hist.buffer[0].clone()
   d_before = delay.peek()[0].clone()
 
@@ -211,7 +225,7 @@ def _noop_event(env, env_ids) -> None:
 
 def _write_marker_velocity(env, env_ids) -> None:
   """Overwrite joint velocities with a recognizable marker value."""
-  asset = env.scene["cartpole"]
+  asset = env.scene["robot"]
   if env_ids is None:
     env_ids = torch.arange(env.num_envs, device=env.device)
   joint_pos = asset.data.joint_pos[env_ids]
@@ -220,26 +234,36 @@ def _write_marker_velocity(env, env_ids) -> None:
 
 
 def _make_parity_cfg(auto_reset: bool):
-  """Cartpole cfg with fixed-interval command and event timers.
+  """G1 velocity cfg with fixed-interval command and event timers.
 
   Fixed ranges make timer values deterministic, so assertions are exact and
-  independent of RNG state and physics nondeterminism.
+  independent of RNG state and physics nondeterminism. The "counter" command
+  and "probe" event are added alongside the task's own terms so its obs and
+  reward terms keep resolving.
   """
   cfg = _make_cfg(auto_reset)
-  cfg.commands = {
-    "counter": CounterCommandCfg(resampling_time_range=(_COMMAND_T, _COMMAND_T))
-  }
+  cfg.commands["counter"] = CounterCommandCfg(
+    resampling_time_range=(_COMMAND_T, _COMMAND_T)
+  )
   cfg.events["probe"] = EventTermCfg(
     func=_noop_event, mode="interval", interval_range_s=(_INTERVAL_T, _INTERVAL_T)
   )
   return cfg
 
 
+def _probe_interval_timer(env) -> torch.Tensor:
+  """Time-left tensor of the "probe" interval event (G1 cfg has several)."""
+  names = env.event_manager._mode_term_names["interval"]
+  return env.event_manager._interval_term_time_left[names.index("probe")]
+
+
 def _stagger_env0(env, steps_until_reset: int) -> torch.Tensor:
   """Advance env 0's episode clock so it times out after the given steps."""
   env.reset()
   env.episode_length_buf[0] = env.max_episode_length - steps_until_reset
-  return torch.zeros((env.num_envs, 1), device=env.device)
+  return torch.zeros(
+    (env.num_envs, env.action_manager.total_action_dim), device=env.device
+  )
 
 
 def test_auto_reset_preserves_fresh_command_timer(device):
@@ -269,7 +293,7 @@ def test_auto_reset_preserves_fresh_interval_event_timer(device):
   env.step(action)  # Env 0 times out and auto-resets here.
   assert env.episode_length_buf[0].item() == 0
 
-  timer = env.event_manager._interval_term_time_left[0]
+  timer = _probe_interval_timer(env)
   expected_running = _INTERVAL_T - 2 * env.step_dt
   assert torch.allclose(timer[0], torch.tensor(_INTERVAL_T, device=env.device))
   assert torch.allclose(timer[1:], torch.tensor(expected_running, device=env.device))
@@ -288,7 +312,7 @@ def test_interval_event_acts_on_pre_reset_state(device):
   env.step(action)  # Kick fires for all envs; env 0 then auto-resets.
   assert env.episode_length_buf[0].item() == 0
 
-  joint_vel = env.scene["cartpole"].data.joint_vel
+  joint_vel = env.scene["robot"].data.joint_vel
   # Env 0 was reset after the kick: its velocity is the reset distribution's,
   # not the marker. Env 1 was not reset and still carries the marker.
   assert joint_vel[0].abs().max().item() < 1.0
@@ -303,7 +327,10 @@ def test_auto_reset_matches_manual_reset_timers(device):
   auto_env.reset(seed=0)
   manual_env.reset(seed=0)
 
-  action = torch.zeros((auto_env.num_envs, 1), device=auto_env.device)
+  action = torch.zeros(
+    (auto_env.num_envs, auto_env.action_manager.total_action_dim),
+    device=auto_env.device,
+  )
   done = torch.zeros(auto_env.num_envs, dtype=torch.bool, device=auto_env.device)
   for _ in range(auto_env.max_episode_length):
     auto_env.step(action)
@@ -316,7 +343,7 @@ def test_auto_reset_matches_manual_reset_timers(device):
   for env in (auto_env, manual_env):
     term = env.command_manager.get_term("counter")
     assert isinstance(term, CounterCommand)
-    interval_timer = env.event_manager._interval_term_time_left[0]
+    interval_timer = _probe_interval_timer(env)
     assert torch.all(env.episode_length_buf == 0)
     assert torch.allclose(term.time_left, torch.full_like(term.time_left, _COMMAND_T))
     assert torch.allclose(interval_timer, torch.full_like(interval_timer, _INTERVAL_T))

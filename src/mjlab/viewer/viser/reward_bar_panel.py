@@ -89,7 +89,7 @@ class RewardBarPanel:
 
   def _render_empty(self) -> None:
     self._html_handle.content = (
-      '<div style="padding:0.5em;color:#999;font-size:0.85em;">Waiting for data…</div>'
+      '<div style="padding:0.5em;color:#555;font-size:0.85em;">Waiting for data…</div>'
     )
 
   def _render(self) -> None:
@@ -110,7 +110,8 @@ class RewardBarPanel:
       val = means[name]
       pct = abs(val) / max_abs * 100.0
       color = "#4caf50" if val >= 0 else "#f44336"  # green / red
-      text_color = "#fff" if pct > 25 else "#ccc"
+      # Numeric overlay sits on the dark bar track (#333); keep light text there.
+      bar_value_color = "#fff" if pct > 25 else "#e0e0e0"
 
       # Value label — short scientific if tiny, else 4-decimal.
       if abs(val) < 1e-6 and val != 0:
@@ -123,8 +124,8 @@ class RewardBarPanel:
         f'<div style="display:flex;align-items:center;margin:2px 0;">'
         # Label
         f'<span style="min-width:120px;font-size:0.78em;text-align:right;'
-        f"padding-right:6px;color:#ddd;white-space:nowrap;overflow:hidden;"
-        f'text-overflow:ellipsis;" title="{safe_name}">{safe_name}</span>'
+        f"padding-right:6px;color:#222;font-weight:600;white-space:nowrap;"
+        f'overflow:hidden;text-overflow:ellipsis;" title="{safe_name}">{safe_name}</span>'
         # Bar container
         f'<div style="flex:1;background:#333;border-radius:3px;height:18px;'
         f'position:relative;overflow:hidden;">'
@@ -133,7 +134,7 @@ class RewardBarPanel:
         f'border-radius:3px;transition:width 0.15s;"></div>'
         # Numeric value overlay
         f'<span style="position:absolute;right:4px;top:0;line-height:18px;'
-        f'font-size:0.72em;color:{text_color};">{val_str}</span>'
+        f'font-size:0.72em;color:{bar_value_color};">{val_str}</span>'
         f"</div></div>"
       )
 

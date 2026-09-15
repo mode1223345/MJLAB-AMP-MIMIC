@@ -1,6 +1,6 @@
 """Interactive IK control demo.
 
-Drag the 3D transform control in the viser viewer to move the YAM end-effector.
+Drag the 3D transform control in the viser viewer to move the G1 left-palm end-effector.
 
 Run with:
   MJLAB_WARP_QUIET=1 uv run scripts/demos/differential_ik.py
@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import torch
 import viser
 
-from mjlab.asset_zoo.robots.i2rt_yam.yam_constants import get_yam_robot_cfg
+from mjlab.asset_zoo.robots.unitree_g1.g1_constants import get_g1_robot_cfg
 from mjlab.entity import Entity, EntityCfg
 from mjlab.envs.mdp.actions import DifferentialIKAction, DifferentialIKActionCfg
 from mjlab.sim.sim import MujocoCfg, Simulation, SimulationCfg
@@ -39,7 +39,7 @@ IK_ITERATIONS = 10
 def main() -> None:
   device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-  robot_cfg = get_yam_robot_cfg()
+  robot_cfg = get_g1_robot_cfg()
   robot_cfg.init_state = DEMO_INIT_STATE
   entity = Entity(robot_cfg)
   model = entity.compile()
@@ -53,7 +53,7 @@ def main() -> None:
   ik_cfg = DifferentialIKActionCfg(
     entity_name="robot",
     actuator_names=("joint.*",),
-    frame_name="grasp_site",
+    frame_name="left_palm",
     frame_type="site",
     posture_weight=0.02,
     joint_limit_weight=1e-1,

@@ -2,7 +2,7 @@
 
 import pytest
 
-from mjlab.asset_zoo.robots import G1_ACTION_SCALE, GO1_ACTION_SCALE
+from mjlab.asset_zoo.robots import G1_ACTION_SCALE
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
@@ -18,12 +18,6 @@ def velocity_task_ids() -> list[str]:
 def g1_velocity_task_ids(velocity_task_ids: list[str]) -> list[str]:
   """Get all G1 velocity task IDs."""
   return [t for t in velocity_task_ids if "G1" in t]
-
-
-@pytest.fixture(scope="module")
-def go1_velocity_task_ids(velocity_task_ids: list[str]) -> list[str]:
-  """Get all Go1 velocity task IDs."""
-  return [t for t in velocity_task_ids if "Go1" in t]
 
 
 @pytest.fixture(scope="module")
@@ -67,27 +61,6 @@ def test_g1_velocity_has_required_sensors(g1_velocity_task_ids: list[str]) -> No
     )
 
 
-def test_go1_velocity_has_required_sensors(go1_velocity_task_ids: list[str]) -> None:
-  """Go1 velocity tasks should have feet/ground and collision sensors."""
-  for task_id in go1_velocity_task_ids:
-    cfg = load_env_cfg(task_id)
-
-    assert cfg.scene.sensors is not None, f"Task {task_id} has no sensors"
-
-    sensor_names = {s.name for s in cfg.scene.sensors}
-    assert "feet_ground_contact" in sensor_names, (
-      f"Task {task_id} missing feet_ground_contact sensor"
-    )
-    if "Rough" in task_id:
-      for name in (
-        "self_collision",
-        "thigh_ground_touch",
-        "shank_ground_touch",
-        "trunk_ground_touch",
-      ):
-        assert name in sensor_names, f"Task {task_id} missing {name} sensor"
-
-
 def test_flat_velocity_tasks_have_plane_terrain(
   flat_velocity_task_ids: list[str],
 ) -> None:
@@ -125,7 +98,6 @@ def test_rough_velocity_training_has_curriculum_enabled() -> None:
   """Rough velocity training tasks should have terrain curriculum enabled."""
   rough_training_tasks = [
     "Mjlab-Velocity-Rough-Unitree-G1",
-    "Mjlab-Velocity-Rough-Unitree-Go1",
   ]
 
   for task_id in rough_training_tasks:
@@ -145,7 +117,6 @@ def test_rough_velocity_play_has_curriculum_disabled() -> None:
   """Rough velocity play tasks should have terrain curriculum disabled."""
   rough_training_tasks = [
     "Mjlab-Velocity-Rough-Unitree-G1",
-    "Mjlab-Velocity-Rough-Unitree-Go1",
   ]
 
   for task_id in rough_training_tasks:
@@ -177,23 +148,4 @@ def test_g1_velocity_has_correct_action_scale(g1_velocity_task_ids: list[str]) -
 
     assert joint_pos_action.scale == G1_ACTION_SCALE, (
       f"Task {task_id} action scale mismatch, expected G1_ACTION_SCALE"
-    )
-
-
-def test_go1_velocity_has_correct_action_scale(
-  go1_velocity_task_ids: list[str],
-) -> None:
-  """Go1 velocity tasks should use GO1_ACTION_SCALE."""
-  for task_id in go1_velocity_task_ids:
-    cfg = load_env_cfg(task_id)
-
-    assert "joint_pos" in cfg.actions, f"Task {task_id} missing 'joint_pos' action"
-
-    joint_pos_action = cfg.actions["joint_pos"]
-    assert isinstance(joint_pos_action, JointPositionActionCfg), (
-      f"Task {task_id} joint_pos action is not JointPositionActionCfg"
-    )
-
-    assert joint_pos_action.scale == GO1_ACTION_SCALE, (
-      f"Task {task_id} action scale mismatch, expected GO1_ACTION_SCALE"
     )

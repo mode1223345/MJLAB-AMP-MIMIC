@@ -15,6 +15,13 @@ import viser
 
 from mjlab.sensor import CameraSensor
 from mjlab.viewer.viser.camera_viewer import ViserCameraViewer
+from mjlab.viewer.viser.force_panel import ForcePanel
+from mjlab.viewer.viser.joint_panel import (
+  JointStatePanel,
+  action_series_name,
+  pos_series_name,
+  vel_series_name,
+)
 from mjlab.viewer.viser.reward_bar_panel import RewardBarPanel
 from mjlab.viewer.viser.term_plotter import ViserTermPlotter
 
@@ -215,3 +222,108 @@ class ViserContactOverlays:
     """Request a scene refresh when switching environments with contacts enabled."""
     if self.is_enabled():
       self.scene.needs_update = True
+
+
+@dataclass
+class ViserForceOverlays:
+  """Numeric joint-torque / contact-force panel + time-series plots."""
+
+  server: viser.ViserServer
+  env: _EnvProtocol
+  scene: _SceneProtocol
+  force_panel: ForcePanel | None = None
+  force_plotter: ViserTermPlotter | None = None
+
+  def setup_tab(self, tabs: Any) -> None:
+    """Create the Forces tab with values panel and curve plots."""
+    with tabs.add_tab("Forces", icon=viser.Icon.ACTIVITY):
+      self.force_panel = ForcePanel(
+        self.server,
+        self.env,
+        get_env_idx=lambda: self.scene.env_idx,
+      )
+      term_names = self.force_panel.term_names
+      if term_names:
+        # Default: plot both foot↔terrain contact magnitudes.
+        self.force_plotter = ViserTermPlotter(
+          self.server,
+          term_names,
+          name="Force",
+          env_idx=self.scene.env_idx,
+          initially_enabled=list(self.force_panel.contact_term_names),
+        )
+
+  def on_env_switch(self) -> None:
+    if self.force_plotter is not None:
+      self.force_plotter.clear_histories()
+      self.force_plotter.update_env_idx(self.scene.env_idx)
+
+  def update(self) -> None:
+    if self.force_panel is not None:
+      self.force_panel.update()
+      if self.force_plotter is not None and self.force_panel.last_terms:
+        self.force_plotter.update(self.force_panel.last_terms)
+
+  def cleanup(self) -> None:
+    if self.force_plotter is not None:
+      self.force_plotter.cleanup()
+      self.force_plotter = None
+    if self.force_panel is not None:
+      self.force_panel.cleanup()
+      self.force_panel = None
+
+
+@dataclass
+class ViserJointOverlays:
+  """Per-joint action / position / velocity panel + time-series plots."""
+
+  server: viser.ViserServer
+  env: _EnvProtocol
+  scene: _SceneProtocol
+  joint_panel: JointStatePanel | None = None
+  joint_plotter: ViserTermPlotter | None = None
+
+  def setup_tab(self, tabs: Any) -> None:
+    """Create the Joints tab with values table and selectable curves."""
+    with tabs.add_tab("Joints", icon=viser.Icon.ADJUSTMENTS):
+      self.joint_panel = JointStatePanel(
+        self.server,
+        self.env,
+        get_env_idx=lambda: self.scene.env_idx,
+      )
+      term_names = self.joint_panel.term_names
+      if term_names:
+        # Default: first joint's action/pos/vel so the tab is immediately useful.
+        first = self.joint_panel.joint_names[:1]
+        initially = []
+        if first:
+          jn = first[0]
+          if self.joint_panel.has_matching_action:
+            initially.append(action_series_name(jn))
+          initially.extend([pos_series_name(jn), vel_series_name(jn)])
+        self.joint_plotter = ViserTermPlotter(
+          self.server,
+          term_names,
+          name="Joint",
+          env_idx=self.scene.env_idx,
+          initially_enabled=initially,
+        )
+
+  def on_env_switch(self) -> None:
+    if self.joint_plotter is not None:
+      self.joint_plotter.clear_histories()
+      self.joint_plotter.update_env_idx(self.scene.env_idx)
+
+  def update(self) -> None:
+    if self.joint_panel is not None:
+      self.joint_panel.update()
+      if self.joint_plotter is not None and self.joint_panel.last_terms:
+        self.joint_plotter.update(self.joint_panel.last_terms)
+
+  def cleanup(self) -> None:
+    if self.joint_plotter is not None:
+      self.joint_plotter.cleanup()
+      self.joint_plotter = None
+    if self.joint_panel is not None:
+      self.joint_panel.cleanup()
+      self.joint_panel = None

@@ -162,6 +162,15 @@ class ManagerBasedRlEnvCfg:
   algorithms that expect unscaled reward signals (e.g., HER, static reward scaling).
   """
 
+  # AMP-specific (optional; ignored by non-AMP tasks). Must be real fields so
+  # tyro CLI overrides preserve them (monkey-patched attrs are dropped).
+  amp_motion_files: list[str] = field(default_factory=list)
+  """Expert motion JSON paths for AMP discriminator / RSI."""
+  amp_reference_observation_horizon: int = 1
+  """Discriminator reference observation window length (frames)."""
+  amp_num_preload_transitions: int = 200000
+  """Number of expert transitions to preload for the AMP discriminator."""
+
 
 class ManagerBasedRlEnv:
   """Manager-based RL environment."""

@@ -94,6 +94,8 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
     2. Migrate legacy checkpoints (actor.* -> mlp.*, actor_obs_normalizer.*
       -> obs_normalizer.*) to the current format (rsl-rl>=4.0).
     """
+    if map_location is None:
+      map_location = self.device
     loaded_dict = torch.load(path, map_location=map_location, weights_only=False)
 
     if "model_state_dict" in loaded_dict:

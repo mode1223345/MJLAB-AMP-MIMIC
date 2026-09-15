@@ -231,6 +231,15 @@ class CommandManager(ManagerBase):
     for term in self._terms.values():
       term.on_viewer_pause(paused)
 
+  def on_key(self, key: int) -> bool:
+    """Dispatch a native-viewer key to command terms. Returns True if handled."""
+    handled = False
+    for term in self._terms.values():
+      handler = getattr(term, "on_key", None)
+      if callable(handler):
+        handled = bool(handler(key)) or handled
+    return handled
+
   def apply_gui_reset(self, env_ids: torch.Tensor) -> bool:
     """Apply GUI-selected state from all terms. Returns True if any applied."""
     applied = False
