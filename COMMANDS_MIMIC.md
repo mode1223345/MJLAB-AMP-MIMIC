@@ -2,7 +2,8 @@
 
 全部命令在仓库根目录执行。任务名固定为 `Mjlab-Tracking-Flat-N3-Mimic`
 （Isaac `mimic_noetix_n3_mha` 全量移植：MHA 注意力策略 + HIM 估计器），
-动作库在 `motions/mimic_data/N3/npz_baselink/`（32 个 npz，50fps，文件名里的 30fps 是历史命名），
+动作库在 `motions/mimic_data/N3/npz_baselink/`（33 个 npz：32 个高动态 + 1 个起身
+`n3_起身_50hz.npz`，均 50fps，文件名里的 30fps 是历史命名），
 训练日志写在 `logs/rsl_rl/tracking_n3_mha_mimic/`。
 
 > ROS PYTHONPATH 注意事项与 tyro 两条硬规则（布尔量显式给值、集合量用 Python
@@ -26,7 +27,7 @@ uv run play Mjlab-Tracking-Flat-N3-Mimic --help
 uv run python scripts/tools/validate_mimic_npz.py \
   --npz "motions/mimic_data/N3/npz_baselink/n3_侧空翻_30fps.npz"
 
-# 校验整个动作库（32 个逐个查）
+# 校验整个动作库（33 个逐个查）
 uv run python scripts/tools/validate_mimic_npz.py --npz motions/mimic_data/N3/npz_baselink
 
 # 列出全部动作（肉眼挑）
@@ -49,7 +50,12 @@ CUDA_VISIBLE_DEVICES=0 uv run train Mjlab-Tracking-Flat-N3-Mimic \
   --env.commands.motion.motion-file "motions/mimic_data/N3/npz_baselink/n3_后空翻_30fps.npz" \
   --agent.max-iterations 30000 --agent.run-name backflip
 
-# 多片段混训（可选；motion-file 指目录 = 库内全部 32 个拼接训练，二选一的工作流）
+# 起身动作单独训（AMP recovery json 转换来的 npz，起始帧即躺姿，RSI 对齐）
+uv run train Mjlab-Tracking-Flat-N3-Mimic \
+  --env.commands.motion.motion-file "motions/mimic_data/N3/npz_baselink/n3_起身_50hz.npz" \
+  --agent.run-name getup
+
+# 多片段混训（可选；motion-file 指目录 = 库内全部动作拼接训练，二选一的工作流）
 uv run train Mjlab-Tracking-Flat-N3-Mimic \
   --env.commands.motion.motion-file motions/mimic_data/N3/npz_baselink \
   --agent.run-name all32
@@ -113,7 +119,7 @@ env -u PYTHONPATH uv run pytest tests/test_n3_mimic.py -q
 
 | 路径 | 内容 |
 | --- | --- |
-| `motions/mimic_data/N3/npz_baselink/` | 32 个 mimic 动作 npz（baselink 版，原始 CSV + 本地 N3.xml FK 生成；默认单动作训练，指目录=混训） |
+| `motions/mimic_data/N3/npz_baselink/` | 33 个 mimic 动作 npz（baselink 版：32 高动态来自原始 CSV+本地 N3.xml FK，n3_起身_50hz 来自 AMP recovery json；默认单动作训练，指目录=混训） |
 | `motions/mimic_data/N3/json_baselink/` | 32 个部署 json（baselink 格式，npz_to_baselink_json.py 从上面 npz 转出） |
 | `logs/rsl_rl/tracking_n3_mha_mimic/<run>/` | checkpoint（`model_*.pt`，每 500 迭代）、tensorboard |
 | `src/mjlab/tasks/tracking/config/N3/` | N3 mimic 任务配置（env_cfg.py = 环境参数+奖励表，rl_cfg.py = MHA+HIM PPO 超参） |

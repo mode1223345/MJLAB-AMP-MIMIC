@@ -138,7 +138,8 @@ def test_n3_mimic_task_cfg():
   # 默认单动作训练（每个动作单独训一个策略）；目录模式（多片段混训）仍受支持。
   motion_file = REPO_ROOT / cfg.commands["motion"].motion_file
   assert motion_file.is_file()
-  assert len(list(motion_file.parent.glob("*.npz"))) == 32
+  # 32 个高动态动作 + n3_起身_50hz（AMP recovery json 转换）。
+  assert len(list(motion_file.parent.glob("*.npz"))) == 33
 
   agent = load_rl_cfg(TASK)
   assert isinstance(agent, MhaHimPpoRunnerCfg)
