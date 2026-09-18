@@ -89,10 +89,11 @@ def test_nan_detection_with_termination_manager(mock_env_with_sim):
   assert manager.terminated[1]
   assert not manager.time_outs[1]
 
-  # Reset should log the termination.
+  # Reset should log the termination as a fraction of the reset envs.
   reset_info = manager.reset(torch.tensor([1], device=env.device))
   assert "Episode_Termination/nan_term" in reset_info
-  assert reset_info["Episode_Termination/nan_term"] == 1
+  assert reset_info["Episode_Termination/nan_term"] == 1.0
+  assert reset_info["Episode_Termination_any/nan_term"] == 1.0
 
   # Inject Inf in multiple envs.
   env.sim.data.qvel[0, 0] = float("inf")
@@ -101,9 +102,9 @@ def test_nan_detection_with_termination_manager(mock_env_with_sim):
   result = manager.compute()
   assert result[0] and result[2]
 
-  # Reset should log multiple terminations.
-  reset_info = manager.reset(torch.tensor([0, 2], device=env.device))
-  assert reset_info["Episode_Termination/nan_term"] == 2
+  # Two of three reset envs end by ``nan_term``: the share is 2/3, not a count.
+  reset_info = manager.reset(torch.tensor([0, 2, 3], device=env.device))
+  assert reset_info["Episode_Termination/nan_term"] == pytest.approx(2 / 3)
 
 
 @pytest.fixture

@@ -19,7 +19,12 @@ from mjlab.entity import Entity
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.sensor import GridPatternCfg, RayCastSensorCfg
 from mjlab.tasks.amp.config.N3.rl_cfg import AmpHimPpoRunnerCfg
-from mjlab.tasks.amp.mdp.rewards import both_feet_air, root_height_out_of_range
+from mjlab.tasks.amp.mdp.rewards import (
+  both_feet_air,
+  feet_air_time_positive_biped,
+  low_speed,
+  root_height_out_of_range,
+)
 from mjlab.tasks.amp.mdp.symmetry_n3 import (
   data_augmentation_func,
   flip_actor_obs,
@@ -140,6 +145,45 @@ def test_n3_height_and_air_rewards():
   torch.testing.assert_close(both_feet_air(env), torch.tensor([1.0, 0, 0, 0]))
 
 
+def test_n3_low_speed_follows_command_sign():
+  """The speed band is applied to vx/cmd_x, so reversing does not earn it."""
+  env = MagicMock()
+  robot = MagicMock()
+  env.scene.__getitem__.side_effect = {"robot": robot}.__getitem__
+  cmd_x = torch.tensor([1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 0.1, 0.0, 0.2])
+  vx = torch.tensor([1.0, -1.0, -1.0, 1.0, 0.5, 1.5, 1.0, 0.0, 0.2])
+  robot.data.root_link_lin_vel_b = torch.zeros(len(cmd_x), 3)
+  robot.data.root_link_lin_vel_b[:, 0] = vx
+  env.command_manager.get_command.return_value = torch.stack(
+    [cmd_x, torch.zeros_like(cmd_x), torch.zeros_like(cmd_x)], dim=1
+  )
+  expected = torch.tensor([1.2, -1.0, 1.2, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0])
+  torch.testing.assert_close(low_speed(env), expected)
+
+
+def test_n3_feet_air_time_cap_shrinks_with_speed():
+  """The stance-time cap decays with commanded speed instead of pinning 0.35 s."""
+  env = MagicMock()
+  sensor = MagicMock()
+  env.scene.__getitem__.side_effect = {"feet_ground_contact": sensor}.__getitem__
+  # Left foot loaded for 0.6 s, right foot airborne for 0.4 s -> shorter phase 0.4.
+  sensor.data.current_contact_time = torch.tensor([[0.6, 0.0], [0.6, 0.0]])
+  sensor.data.current_air_time = torch.tensor([[0.0, 0.4], [0.0, 0.4]])
+  env.command_manager.get_command.return_value = torch.tensor(
+    [[0.5, 0.0, 0.0], [2.5, 0.0, 0.0]]
+  )
+  torch.testing.assert_close(
+    feet_air_time_positive_biped(env, threshold=0.35), torch.tensor([0.35, 0.35])
+  )
+  # 0.35 + (0.15 - 0.35) * (v / 2.5): 0.31 at 0.5 m/s, 0.15 at 2.5 m/s.
+  torch.testing.assert_close(
+    feet_air_time_positive_biped(
+      env, threshold=0.35, min_threshold=0.15, speed_max=2.5
+    ),
+    torch.tensor([0.31, 0.15]),
+  )
+
+
 @pytest.mark.slow
 def test_n3_amp_training_step(n3_robot, tmp_path: Path):
   """Exercise resets, sensors, symmetry, AMP/HIM updates, and checkpoint I/O.
@@ -214,6 +258,17 @@ def test_n3_amp_training_step(n3_robot, tmp_path: Path):
       actions = restored.get_inference_policy()(restored.env.get_observations())
     assert actions.shape == (4, 29)
     assert torch.isfinite(actions).all()
+    # Viser panels read the play runner's real AMP buffers and terminations.
+    amp_terms = dict(restored.get_amp_reward_panel_terms(0))
+    assert list(amp_terms) == ["style_reward", "task_reward"]
+    assert all(np.isfinite(v[0]) for v in amp_terms.values())
+    term_manager = restored.env.unwrapped.termination_manager
+    assert set(term_manager.active_terms) == {
+      "time_out",
+      "fall_down",
+      "bad_orientation",
+    }
+    assert term_manager.get_last_episode_term("fall_down").shape == (4,)
   finally:
     if runner is not None and runner.writer is not None:
       runner.writer.close()

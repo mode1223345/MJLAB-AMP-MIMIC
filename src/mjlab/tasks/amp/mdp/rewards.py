@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import math
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
@@ -17,10 +19,64 @@ from mjlab.utils.lab_api.math import (
   yaw_quat,
 )
 
+from .terminations import get_delay_env_mask
+
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+
+
+def delay_masked(func: Callable) -> Callable:
+  """Zero a reward term for delay envs (fall-recovery training).
+
+  Wraps a reward function so that environments flagged as delay envs (see
+  :class:`DelayedTerminationManager`) receive 0 instead of the term value.
+  With no delayed termination installed the wrapper is a pass-through.
+  """
+
+  @functools.wraps(func)
+  def wrapped(env: ManagerBasedRlEnv, **kwargs) -> torch.Tensor:
+    reward = func(env, **kwargs)
+    mask = get_delay_env_mask(env)
+    if mask is None:
+      return reward
+    return torch.where(mask, torch.zeros_like(reward), reward)
+
+  return wrapped
+
+
+def track_root_height(
+  env: ManagerBasedRlEnv,
+  std: float,
+  delay_env_rew_ratio: float = 3.5,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Get-up reward: track the default standing root height.
+
+  Delay envs only (delay-mask): ``delay_env_rew_ratio``-scaled exponential
+  height-tracking reward — the primary learning signal for standing back up.
+  Returns zeros when delayed termination is not installed.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  desired_height = asset.data.default_root_state[:, 2]
+  height = asset.data.root_link_pos_w[:, 2]
+  reward = torch.exp(-torch.square(desired_height - height) / std**2)
+  mask = get_delay_env_mask(env)
+  if mask is None:
+    return torch.zeros_like(reward)
+  return torch.where(mask, delay_env_rew_ratio * reward, torch.zeros_like(reward))
+
+
+def is_terminated(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """1 for envs terminated by a bad (non-timeout) termination this step.
+
+  Note: with delayed termination installed, suppressed falls do not count
+  (the buffer already reflects the suppression), so lying delay envs are not
+  penalized — only actually-released resets and normal-env falls are.
+  """
+  tm = env.termination_manager
+  return (tm.terminated & ~tm.time_outs).float()
 
 
 def root_height_out_of_range(
@@ -38,12 +94,26 @@ def root_height_out_of_range(
 
 
 def both_feet_air(
-  env: ManagerBasedRlEnv, sensor_name: str = "feet_ground_contact"
+  env: ManagerBasedRlEnv,
+  sensor_name: str = "feet_ground_contact",
+  command_name: str | None = None,
+  speed_threshold: float = 1.5,
 ) -> torch.Tensor:
-  """Return one when neither foot contacts the ground."""
+  """Return one when neither foot contacts the ground.
+
+  With ``command_name`` set, fast commands (planar command norm above
+  ``speed_threshold``) are exempt: running gaits have a legitimate flight
+  phase, so the penalty only guards against hopping at walking speeds.
+  """
   sensor: ContactSensor = env.scene[sensor_name]
   assert sensor.data.found is not None
-  return (sensor.data.found == 0).all(dim=-1).float()
+  both_air = (sensor.data.found == 0).all(dim=-1).float()
+  if command_name is None:
+    return both_air
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  slow_command = torch.norm(command[:, :2], dim=1) <= speed_threshold
+  return both_air * slow_command.float()
 
 
 def _pure_forward_command_mask(
@@ -211,10 +281,23 @@ def feet_contact(
 def feet_air_time_positive_biped(
   env: ManagerBasedRlEnv,
   threshold: float = 0.5,
+  min_threshold: float | None = None,
+  speed_max: float = 2.5,
   sensor_name: str = "feet_ground_contact",
   command_name: str = "twist",
 ) -> torch.Tensor:
-  """Reward single-stance mode time (air or contact), capped at ``threshold``."""
+  """Reward single-stance mode time (air or contact), capped at ``threshold``.
+
+  The cap is the target phase time: reward grows with the shorter of the two
+  feet's current phase times and saturates at the cap. With ``min_threshold``
+  set, the cap decays linearly with commanded speed, from ``threshold`` at
+  standstill to ``min_threshold`` at ``speed_max`` and above, so fast commands
+  target short phases. Stance times above the cap at running speed leave the
+  term saturated (constant, no gradient) rather than pushing toward a low
+  cadence.
+  """
+  if min_threshold is not None and speed_max <= 0.0:
+    raise ValueError("speed_max must be positive when min_threshold is set")
   sensor: ContactSensor = env.scene[sensor_name]
   assert sensor.data.current_air_time is not None
   assert sensor.data.current_contact_time is not None
@@ -226,9 +309,14 @@ def feet_air_time_positive_biped(
   reward = torch.min(
     torch.where(single_stance.unsqueeze(-1), in_mode_time, 0.0), dim=1
   )[0]
-  reward = torch.clamp(reward, max=threshold)
   command = env.command_manager.get_command(command_name)
   assert command is not None
+  if min_threshold is not None:
+    speed = torch.linalg.vector_norm(command[:, :2], dim=1)
+    blend = torch.clamp(speed / speed_max, max=1.0)
+    reward = torch.minimum(reward, threshold + (min_threshold - threshold) * blend)
+  else:
+    reward = torch.clamp(reward, max=threshold)
   reward *= (torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])) > 0.1
   return reward
 
@@ -320,6 +408,51 @@ def feet_flat_orientation_when_loaded(
   contact_force = torch.linalg.vector_norm(sensor.data.force, dim=-1)
   loaded = contact_force > force_threshold
   return torch.sum(torch.square(excess_tilt) * loaded.float(), dim=1)
+
+
+def feet_contact_roll_penalty(
+  env: ManagerBasedRlEnv,
+  threshold: float = 0.08,
+  force_threshold: float = 1.0,
+  sensor_name: str = "feet_ground_contact",
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize an inverted/everted foot beyond ``threshold`` while loaded.
+
+  Linear (not squared) in the excess roll, summed over the feet whose net
+  contact force exceeds ``force_threshold``. Roll is the world-frame xyz-Euler
+  component: a flat foot reads zero at any heading, but a tilted foot also
+  picks up pitch when the robot faces off x. Ported from the Noetix walkrun
+  task, which used weight -1.0 and the same 0.08 rad (4.6 deg) deadzone.
+  """
+  if threshold < 0.0:
+    raise ValueError("threshold must be non-negative")
+  if force_threshold < 0.0:
+    raise ValueError("force_threshold must be non-negative")
+
+  asset: Entity = env.scene[asset_cfg.name]
+  body_ids = asset_cfg.body_ids
+  if isinstance(body_ids, slice) or (
+    isinstance(body_ids, (list, tuple)) and len(body_ids) == 0
+  ):
+    body_ids, _ = asset.find_bodies(".*_ankle_roll_link")
+
+  sensor: ContactSensor = env.scene[sensor_name]
+  assert sensor.data.force is not None
+  # force: [B, num_feet, 3]（与足 body 顺序一致）
+  if sensor.data.force.shape[1] != len(body_ids):
+    raise ValueError(
+      "feet_contact_roll_penalty: foot body count must match contact sensor "
+      "primary slots"
+    )
+
+  contact_force = torch.linalg.vector_norm(sensor.data.force, dim=-1)
+  loaded = contact_force > force_threshold
+  foot_quat_w = asset.data.body_link_quat_w[:, body_ids, :]
+  num_feet = foot_quat_w.shape[1]
+  roll = euler_xyz_from_quat(foot_quat_w.reshape(-1, 4))[0].view(-1, num_feet)
+  excess_roll = torch.clamp(torch.abs(roll) - threshold, min=0.0)
+  return torch.sum(excess_roll * loaded.float(), dim=1)
 
 
 def feet_too_near_humanoid(
@@ -484,6 +617,105 @@ def stand_still(
   return (lin_xy + ang_xy) * standing.float()
 
 
+def _action_rate_sq(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Squared action rate on raw policy output (before per-term scale/offset)."""
+  return torch.sum(
+    torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1
+  )
+
+
+def action_rate_l2_when_moving(
+  env: ManagerBasedRlEnv,
+  command_name: str = "twist",
+  stand_cmd_threshold: float = 0.05,
+) -> torch.Tensor:
+  """Penalize action rate only when the env is commanded to move.
+
+  Port of the Isaac-Lab N3 ``action_rate_walk`` gate: moving means
+  ``‖cmd_xy‖ + |cmd_wz| >= stand_cmd_threshold`` (Isaac used 0.05). Below
+  that the (usually harsher) standing tier takes over instead.
+  """
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  moving = (torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])) >= (
+    stand_cmd_threshold
+  )
+  return _action_rate_sq(env) * moving.float()
+
+
+def action_rate_l2_when_standing(
+  env: ManagerBasedRlEnv,
+  command_name: str = "twist",
+  stand_cmd_threshold: float = 0.05,
+) -> torch.Tensor:
+  """Penalize action rate only when the commanded twist is near zero.
+
+  Isaac-Lab N3 ``action_rate_stand``: same gate as
+  :func:`action_rate_l2_when_moving`, inverted. Standing jitter is pure noise
+  on the real robot, hence a heavier weight than the moving tier.
+  """
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  standing = (torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])) < (
+    stand_cmd_threshold
+  )
+  return _action_rate_sq(env) * standing.float()
+
+
+def joint_vel_limit_margin_penalty(
+  env: ManagerBasedRlEnv,
+  velocity_limits: dict[str, float],
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  ratio: float = 0.9,
+) -> torch.Tensor:
+  """Penalize joint speeds inside the top margin of their rated limits.
+
+  For each selected joint: (|q̇| / limit − ratio)₊², summed. ``velocity_limits``
+  maps joint name → rated speed [rad/s]; joints missing from the table get a
+  1e9 limit (never penalized). Isaac-N3 port (``joint_vel_limit`` term).
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  cache = getattr(env, "_amp_joint_vel_limits", None)
+  if cache is None:
+    device = asset.data.joint_pos.device
+    cache = torch.tensor(
+      [velocity_limits.get(name, 1e9) for name in asset.joint_names],
+      dtype=torch.float32,
+      device=device,
+    )
+    env._amp_joint_vel_limits = cache
+  limit = cache[asset_cfg.joint_ids]
+  exceed = asset.data.joint_vel[:, asset_cfg.joint_ids].abs() / limit - ratio
+  return torch.sum(torch.square(exceed.clamp(min=0.0)), dim=1)
+
+
+def joint_effort_limit_margin_penalty(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  ratio: float = 0.9,
+) -> torch.Tensor:
+  """Penalize actuator forces inside the top margin of their effort limits.
+
+  Computed in actuator space (one position actuator per joint on the AMP
+  robots): (|τ| / effort_limit − ratio)₊² summed over the selected actuators.
+  Limits come from the actuator configs (``effort_limit``); unlimited
+  actuators are skipped. Isaac-N3 port (``joint_effort_limit`` term).
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  force = asset.data.actuator_force
+  cache = getattr(env, "_amp_actuator_effort_limits", None)
+  if cache is None:
+    cache = torch.full((force.shape[1],), 1e9, device=force.device)
+    for act in asset.actuators:
+      effort = getattr(act.cfg, "effort_limit", None)
+      if effort is None:
+        continue
+      cache[act.ctrl_ids] = float(effort)
+    env._amp_actuator_effort_limits = cache
+  exceed = force.abs() / cache - ratio
+  return torch.sum(torch.square(exceed.clamp(min=0.0)), dim=1)
+
+
 def energy(
   env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
 ) -> torch.Tensor:
@@ -601,20 +833,29 @@ def low_speed(
   high_speed_threshold: float = 1.2,
   command_name: str = "twist",
 ) -> torch.Tensor:
+  """Band reward on body-frame ``vx`` relative to ``cmd_x``, along the command.
+
+  The band is applied to the signed ratio ``vx / cmd_x``, so moving against the
+  command gives a negative ratio and lands in the "too slow" branch. Comparing
+  ``|vx|`` against ``|cmd_x|`` cannot tell forward from backward motion and
+  hands the band reward to a robot walking the wrong way. Envs with
+  ``|cmd_x| <= min_cmd_vel`` are inactive and return 0.
+  """
   base_lin_vel = env.scene["robot"].data.root_link_lin_vel_b[:, 0]
   commands = env.command_manager.get_command(command_name)
   assert commands is not None
   commands = commands[:, 0]
-  absolute_speed = torch.abs(base_lin_vel)
-  absolute_command = torch.abs(commands)
-  speed_too_low = absolute_speed < low_speed_threshold * absolute_command
-  speed_too_high = absolute_speed > high_speed_threshold * absolute_command
-  speed_desired = ~(speed_too_low | speed_too_high)
+  active = torch.abs(commands) > min_cmd_vel
+  # Inactive envs are zeroed below; this keeps the division finite.
+  safe_command = torch.where(active, commands, torch.ones_like(commands))
+  speed_ratio = base_lin_vel / safe_command
+  speed_too_low = speed_ratio < low_speed_threshold
+  speed_too_high = speed_ratio > high_speed_threshold
   reward = torch.zeros_like(base_lin_vel)
   reward[speed_too_low] = -1.0
   reward[speed_too_high] = 0.0
-  reward[speed_desired] = 1.2
-  return reward * (absolute_command > min_cmd_vel).float()
+  reward[~(speed_too_low | speed_too_high)] = 1.2
+  return reward * active.float()
 
 
 def track_ang_vel_stand_world_exp(
@@ -634,6 +875,43 @@ def track_ang_vel_stand_world_exp(
   ang_vel_error = torch.square(command[:, 2] - asset.data.root_link_ang_vel_w[:, 2])
   reward = torch.exp(-ang_vel_error / std**2)
   return is_pure_rotation.float() * (reward - lin_vel_threshold * lin_vel_penalty)
+
+
+def waist_com_feet_support_x_error_exp(
+  env: ManagerBasedRlEnv,
+  std: float,
+  target_x: float = 0.0,
+  stand_cmd_threshold: float = 0.05,
+  waist_body_name: str = "waist_yaw_link",
+  command_name: str = "twist",
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalise the waist link COM drifting off the feet centre along x.
+
+  Ported from the IsaacLab walkrun task's ``waist_com_feet_support_x_error_exp``.
+  The offset from the ankle midpoint to the waist COM is expressed in the root
+  yaw frame and only its x component is scored, so ``target_x=0`` means the waist
+  projects onto the middle of the support. Only active for commands with no
+  translation component (stand and in-place turn): while translating, the COM
+  has to lead the feet and this term would fight that.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  body_ids = asset_cfg.body_ids
+  if isinstance(body_ids, slice) or len(body_ids) != 2:
+    raise ValueError("waist_com_feet_support_x_error_exp requires exactly two feet")
+  waist_id = asset.body_names.index(waist_body_name)
+
+  feet_center_w = 0.5 * asset.data.body_link_pos_w[:, body_ids, :].sum(dim=1)
+  waist_from_feet_yaw = quat_apply_inverse(
+    yaw_quat(asset.data.root_link_quat_w),
+    asset.data.body_com_pos_w[:, waist_id] - feet_center_w,
+  )
+  error = torch.square(waist_from_feet_yaw[:, 0] - target_x)
+
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  stationary = torch.norm(command[:, :2], dim=1) < stand_cmd_threshold
+  return torch.exp(-error / std**2) * stationary.float()
 
 
 def track_ang_vel_run_world_exp(

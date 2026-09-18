@@ -14,7 +14,7 @@ from tensordict import TensorDict
 
 from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
 
-from .motion_loader import MotionLoader
+from .motion_loader_attach import build_motion_loader
 
 
 class AmpHimVecEnvWrapper(RslRlVecEnvWrapper):
@@ -67,24 +67,10 @@ class AmpHimVecEnvWrapper(RslRlVecEnvWrapper):
     horizon = int(getattr(cfg, "amp_reference_observation_horizon", 1))
     num_preload = int(getattr(cfg, "amp_num_preload_transitions", 200000))
 
-    robot = unwrapped.scene["robot"]
-    joint_names = list(robot.joint_names)
-    body_names = list(robot.body_names)
-
     object.__setattr__(
       unwrapped,
       "motion_loader",
-      MotionLoader(
-        device=str(unwrapped.device),
-        time_between_frames=float(unwrapped.step_dt),
-        reference_observation_horizon=horizon,
-        num_preload_transitions=num_preload,
-        joint_pos_size=len(joint_names),
-        key_pos_local_size=len(body_names) * 3,
-        motion_files=motion_files,
-        sim_joint_names=joint_names,
-        sim_key_pos_names=body_names,
-      ),
+      build_motion_loader(self, motion_files, horizon, num_preload),
     )
     return True
 

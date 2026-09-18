@@ -8,6 +8,12 @@ network parameter manifests (names, order, shapes).
 If a test fails after an *intentional* config/structure change, regenerate
 with ``uv run python scripts/tools/dump_cfg_golden.py --regen`` and include
 the JSON diff in your change for review.
+
+Marked ``golden``: excluded from ``make test`` / ``make test-fast`` because
+any deliberate cfg tweak (a reward weight, a motion file added or removed)
+trips it by design. Run it with ``make test-golden`` (or ``-m golden``)
+when doing structural work — merging upstream mjlab, refactoring cfg
+plumbing, or moving files around — and review the regen diff then.
 """
 
 from __future__ import annotations
@@ -18,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+pytestmark = pytest.mark.golden
 
 _DUMP_MODULE_PATH = (
   Path(__file__).parents[1] / "scripts" / "tools" / "dump_cfg_golden.py"

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import mujoco
+import numpy as np
 import viser
 
 from mjlab.sensor import CameraSensor
@@ -24,6 +25,7 @@ from mjlab.viewer.viser.joint_panel import (
 )
 from mjlab.viewer.viser.reward_bar_panel import RewardBarPanel
 from mjlab.viewer.viser.term_plotter import ViserTermPlotter
+from mjlab.viewer.viser.termination_panel import TerminationPanel
 
 
 class _EnvProtocol(Protocol):
@@ -58,22 +60,53 @@ class ViserTermOverlays:
   reward_bar_panel: RewardBarPanel | None = None
   metrics_plotter: ViserTermPlotter | None = None
 
+  @staticmethod
+  def _amp_reward_term_names(env: _EnvProtocol) -> list[str]:
+    probe = getattr(env.unwrapped, "amp_reward_probe", None)
+    if probe is None or not hasattr(probe, "get_amp_reward_panel_terms"):
+      return []
+    return ["style_reward", "task_reward"]
+
+  @staticmethod
+  def _amp_reward_terms(
+    env: _EnvProtocol, env_idx: int
+  ) -> list[tuple[str, np.ndarray]]:
+    probe = getattr(env.unwrapped, "amp_reward_probe", None)
+    getter = getattr(probe, "get_amp_reward_panel_terms", None) if probe else None
+    if getter is None:
+      return []
+    try:
+      raw = getter(env_idx)
+    except Exception:
+      return []
+    out: list[tuple[str, np.ndarray]] = []
+    for name, values in raw:
+      arr = np.asarray(values, dtype=np.float64).reshape(-1)
+      if arr.size == 0 or not np.isfinite(arr[0]):
+        arr = np.asarray([0.0], dtype=np.float64)
+      out.append((name, arr))
+    return out
+
   def setup_tabs(self, tabs: Any) -> None:
     """Create rewards/metrics tabs based on available managers."""
     if hasattr(self.env.unwrapped, "reward_manager"):
       with tabs.add_tab("Rewards", icon=viser.Icon.CHART_LINE):
-        term_names = [
+        base_names = [
           name
           for name, _ in self.env.unwrapped.reward_manager.get_active_iterable_terms(
             self.scene.env_idx
           )
         ]
+        term_names = self._amp_reward_term_names(self.env) + base_names
+        # ``reward_bar_max_terms`` is a floor, not a cap: every active term is
+        # shown, and the panel only truncates if the config asks for fewer.
+        max_terms = max(self.reward_bar_max_terms, len(term_names))
         # Live bar panel (running-mean comparison).
         self.reward_bar_panel = RewardBarPanel(
           self.server,
           term_names,
           update_dt=self.frame_time,
-          max_terms=self.reward_bar_max_terms,
+          max_terms=max_terms,
         )
         self.reward_plotter = ViserTermPlotter(
           self.server, term_names, name="Reward", env_idx=self.scene.env_idx
@@ -109,7 +142,7 @@ class ViserTermOverlays:
     if (
       self.reward_plotter is not None or self.reward_bar_panel is not None
     ) and not paused:
-      terms = list(
+      terms = self._amp_reward_terms(self.env, self.scene.env_idx) + list(
         self.env.unwrapped.reward_manager.get_active_iterable_terms(self.scene.env_idx)
       )
       if self.reward_plotter is not None:
@@ -327,3 +360,64 @@ class ViserJointOverlays:
     if self.joint_panel is not None:
       self.joint_panel.cleanup()
       self.joint_panel = None
+
+
+@dataclass
+class ViserTerminationOverlays:
+  """Termination status panel + 0/1 time-series plots."""
+
+  server: viser.ViserServer
+  env: _EnvProtocol
+  scene: _SceneProtocol
+  termination_panel: TerminationPanel | None = None
+  termination_plotter: ViserTermPlotter | None = None
+
+  def setup_tab(self, tabs: Any) -> None:
+    """Create the Terminations tab when the env exposes a termination manager."""
+    if not hasattr(self.env.unwrapped, "termination_manager"):
+      return
+    with tabs.add_tab("Terminations", icon=viser.Icon.OCTAGON):
+      tm = self.env.unwrapped.termination_manager
+      term_names = list(tm.active_terms)
+      self.termination_panel = TerminationPanel(
+        self.server,
+        self.env,
+        get_env_idx=lambda: self.scene.env_idx,
+      )
+      if term_names:
+        # Timeout dominates the plot scale during normal running, so start
+        # with only the failure terms visible.
+        initially_enabled = [
+          name for name in term_names if not tm.get_term_cfg(name).time_out
+        ]
+        self.termination_plotter = ViserTermPlotter(
+          self.server,
+          term_names,
+          name="Termination",
+          env_idx=self.scene.env_idx,
+          initially_enabled=initially_enabled or term_names[:1],
+        )
+
+  def on_env_switch(self) -> None:
+    if self.termination_plotter is not None:
+      self.termination_plotter.clear_histories()
+      self.termination_plotter.update_env_idx(self.scene.env_idx)
+
+  def update(self, paused: bool) -> None:
+    if self.termination_panel is None:
+      return
+    self.termination_panel.update()
+    if self.termination_plotter is not None and not paused:
+      terms = [
+        (name, np.array([val], dtype=np.float64))
+        for name, val in self.termination_panel.last_terms
+      ]
+      self.termination_plotter.update(terms)
+
+  def cleanup(self) -> None:
+    if self.termination_plotter is not None:
+      self.termination_plotter.cleanup()
+      self.termination_plotter = None
+    if self.termination_panel is not None:
+      self.termination_panel.cleanup()
+      self.termination_panel = None

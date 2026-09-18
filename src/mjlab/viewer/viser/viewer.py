@@ -37,6 +37,7 @@ from mjlab.viewer.viser.overlays import (
   ViserDebugOverlays,
   ViserForceOverlays,
   ViserJointOverlays,
+  ViserTerminationOverlays,
   ViserTermOverlays,
 )
 from mjlab.viewer.viser.scene import MjlabViserScene
@@ -88,6 +89,7 @@ class ViserPlayViewer(BaseViewer):
     self._contact_overlays: ViserContactOverlays | None = None
     self._force_overlays: ViserForceOverlays | None = None
     self._joint_overlays: ViserJointOverlays | None = None
+    self._termination_overlays: ViserTerminationOverlays | None = None
     self._head_mass_panel: HeadMassPanel | None = None
     self._foot_friction_panel: FootFrictionPanel | None = None
     self._sim_lock = Lock()
@@ -203,7 +205,9 @@ class ViserPlayViewer(BaseViewer):
             body_name=mass_body,
           )
         robot = env.scene.entities["robot"]
-        if _matched_geom_names(robot, (".*_foot_collision", ".*_ankle_roll_collision")):
+        if _matched_geom_names(
+          robot, (".*_foot.*_collision", ".*_ankle_roll_collision")
+        ):
           self._foot_friction_panel = FootFrictionPanel(
             self._server,
             self.env,
@@ -252,6 +256,10 @@ class ViserPlayViewer(BaseViewer):
     self._force_overlays.setup_tab(tabs)
     self._joint_overlays = ViserJointOverlays(self._server, self.env, self._scene)
     self._joint_overlays.setup_tab(tabs)
+    self._termination_overlays = ViserTerminationOverlays(
+      self._server, self.env, self._scene
+    )
+    self._termination_overlays.setup_tab(tabs)
 
     # Groups tab (geom/site/joint/tendon/actuator visibility).
     with tabs.add_tab("Groups", icon=viser.Icon.LAYERS_INTERSECT):
@@ -423,6 +431,8 @@ class ViserPlayViewer(BaseViewer):
         self._force_overlays.on_env_switch()
       if self._joint_overlays:
         self._joint_overlays.on_env_switch()
+      if self._termination_overlays:
+        self._termination_overlays.on_env_switch()
 
     if self._term_overlays:
       self._term_overlays.update(self._is_paused)
@@ -431,6 +441,8 @@ class ViserPlayViewer(BaseViewer):
       self._force_overlays.update()
     if self._joint_overlays:
       self._joint_overlays.update()
+    if self._termination_overlays:
+      self._termination_overlays.update(self._is_paused)
 
   def _update_camera_feeds(self, sim: Simulation, has_pending_updates: bool) -> None:
     """Push camera sensor frames to GUI when needed."""
@@ -595,6 +607,8 @@ class ViserPlayViewer(BaseViewer):
       self._force_overlays.on_env_switch()
     if self._joint_overlays:
       self._joint_overlays.on_env_switch()
+    if self._termination_overlays:
+      self._termination_overlays.on_env_switch()
 
   @override
   def close(self) -> None:
@@ -605,6 +619,8 @@ class ViserPlayViewer(BaseViewer):
       self._force_overlays.cleanup()
     if self._joint_overlays:
       self._joint_overlays.cleanup()
+    if self._termination_overlays:
+      self._termination_overlays.cleanup()
     if self._camera_overlays:
       self._camera_overlays.cleanup()
     self._threadpool.shutdown(wait=True)

@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+import math
 import os
 import statistics
 import time
 import warnings
 from collections import deque
+from collections.abc import Iterable
+from typing import Any
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -23,6 +26,33 @@ from .him_actor_critic import HimActorCritic
 from .normalizer import Normalizer
 from .utils import resolve_obs_groups, store_code_state
 from .vecenv_wrapper import AmpHimVecEnvWrapper
+
+
+def _finite_mean(values: Iterable[Any], default: float = 0.0) -> float:
+  """Mean of finite numeric samples; ``default`` if empty or all non-finite."""
+  cleaned: list[float] = []
+  for v in values:
+    try:
+      fv = float(v)
+    except (TypeError, ValueError):
+      continue
+    if math.isfinite(fv):
+      cleaned.append(fv)
+  if not cleaned:
+    return default
+  return float(statistics.mean(cleaned))
+
+
+def _safe_ratio(numerator: float, denominator: float, default: float = 0.0) -> float:
+  """``numerator / denominator`` with NaN/Inf/near-zero denominator guards."""
+  if (
+    not math.isfinite(numerator)
+    or not math.isfinite(denominator)
+    or abs(denominator) < 1e-8
+  ):
+    return default
+  out = numerator / denominator
+  return out if math.isfinite(out) else default
 
 
 class AmpHimOnPolicyRunner:
@@ -69,6 +99,9 @@ class AmpHimOnPolicyRunner:
     )
 
     self.alg = self._construct_algorithm(obs)
+
+    # Expose AMP weighted rewards to the Viser RewardBarPanel during play.
+    object.__setattr__(self.env.unwrapped, "amp_reward_probe", self)
 
     self.disable_logs = self.is_distributed and self.gpu_global_rank != 0
     self.log_dir = log_dir
@@ -145,11 +178,15 @@ class AmpHimOnPolicyRunner:
     ep_infos = []
     rewbuffer = deque(maxlen=100)
     srewbuffer = deque(maxlen=100)
+    trewbuffer = deque(maxlen=100)
     lenbuffer = deque(maxlen=100)
     cur_reward_sum = torch.zeros(
       self.env.num_envs, dtype=torch.float, device=self.device
     )
     cur_sreward_sum = torch.zeros(
+      self.env.num_envs, dtype=torch.float, device=self.device
+    )
+    cur_treward_sum = torch.zeros(
       self.env.num_envs, dtype=torch.float, device=self.device
     )
     cur_episode_length = torch.zeros(
@@ -212,12 +249,19 @@ class AmpHimOnPolicyRunner:
             if term_amp is not None:
               amp_observation_buf_with_term[termination_ids] = term_amp
 
-          rewards, style_rewards = self.alg.discriminator.predict_amp_reward(
-            amp_observation_buf_with_term,
-            rewards,
-            self.amp_state_normalizer,
-            self.amp_style_reward_normalizer,
+          rewards, style_rewards, task_rewards = (
+            self.alg.discriminator.predict_amp_reward(
+              amp_observation_buf_with_term,
+              rewards,
+              self.amp_state_normalizer,
+              self.amp_style_reward_normalizer,
+            )
           )
+          rewards = torch.nan_to_num(rewards, nan=0.0, posinf=0.0, neginf=0.0)
+          style_rewards = torch.nan_to_num(
+            style_rewards, nan=0.0, posinf=0.0, neginf=0.0
+          )
+          task_rewards = torch.nan_to_num(task_rewards, nan=0.0, posinf=0.0, neginf=0.0)
 
           self.alg.process_env_step(
             obs,
@@ -241,13 +285,16 @@ class AmpHimOnPolicyRunner:
               ep_infos.append(extras["log"])
             cur_reward_sum += rewards
             cur_sreward_sum += style_rewards
+            cur_treward_sum += task_rewards
             cur_episode_length += 1
             new_ids = (dones > 0).nonzero(as_tuple=False)
             rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
             srewbuffer.extend(cur_sreward_sum[new_ids][:, 0].cpu().numpy().tolist())
+            trewbuffer.extend(cur_treward_sum[new_ids][:, 0].cpu().numpy().tolist())
             lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
             cur_reward_sum[new_ids] = 0
             cur_sreward_sum[new_ids] = 0
+            cur_treward_sum[new_ids] = 0
             cur_episode_length[new_ids] = 0
 
         stop = time.time()
@@ -291,7 +338,9 @@ class AmpHimOnPolicyRunner:
           if len(ep_info[key].shape) == 0:
             ep_info[key] = ep_info[key].unsqueeze(0)
           infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
-        value = torch.mean(infotensor)
+        value = torch.nan_to_num(
+          torch.mean(infotensor), nan=0.0, posinf=0.0, neginf=0.0
+        )
         if "/" in key:
           self._add_scalar(key, value, locs["it"])
           ep_string += f"""{f"{key}:":>{pad}} {value:.4f}\n"""
@@ -312,20 +361,29 @@ class AmpHimOnPolicyRunner:
     self._add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
     self._add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
 
+    mean_reward = None
+    mean_style_reward = None
+    mean_task_reward = None
+    style_reward_fraction = None
+    mean_episode_length = None
     if len(locs["rewbuffer"]) > 0:
-      self._add_scalar(
-        "Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"]
-      )
-      self._add_scalar(
-        "Train/mean_style_reward",
-        statistics.mean(locs["srewbuffer"]),
-        locs["it"],
-      )
-      self._add_scalar(
-        "Train/mean_episode_length",
-        statistics.mean(locs["lenbuffer"]),
-        locs["it"],
-      )
+      mean_reward = _finite_mean(locs["rewbuffer"])
+      mean_style_reward = _finite_mean(locs["srewbuffer"])
+      trewbuffer = locs.get("trewbuffer")
+      if trewbuffer is not None and len(trewbuffer) > 0:
+        mean_task_reward = _finite_mean(trewbuffer)
+      else:
+        mean_task_reward = mean_reward - mean_style_reward
+        if not math.isfinite(mean_task_reward):
+          mean_task_reward = 0.0
+      style_reward_fraction = _safe_ratio(mean_style_reward, mean_reward, default=0.0)
+      mean_episode_length = _finite_mean(locs["lenbuffer"])
+
+      self._add_scalar("Train/mean_reward", mean_reward, locs["it"])
+      self._add_scalar("Train/mean_style_reward", mean_style_reward, locs["it"])
+      self._add_scalar("Train/mean_task_reward", mean_task_reward, locs["it"])
+      self._add_scalar("Train/style_reward_fraction", style_reward_fraction, locs["it"])
+      self._add_scalar("Train/mean_episode_length", mean_episode_length, locs["it"])
 
     str_ = f" \033[1m Learning iteration {locs['it']}/{locs['tot_iter']} \033[0m "
     log_string = (
@@ -339,18 +397,12 @@ class AmpHimOnPolicyRunner:
       if value is None:
         continue
       log_string += f"""{f"Mean {key} loss:":>{pad}} {value:.4f}\n"""
-    if len(locs["rewbuffer"]) > 0:
-      log_string += (
-        f"""{"Mean reward:":>{pad}} {statistics.mean(locs["rewbuffer"]):.2f}\n"""
-      )
-      log_string += (
-        f"""{"Mean style reward:":>{pad}} """
-        f"""{statistics.mean(locs["srewbuffer"]):.2f}\n"""
-      )
-      log_string += (
-        f"""{"Mean episode length:":>{pad}} """
-        f"""{statistics.mean(locs["lenbuffer"]):.2f}\n"""
-      )
+    if mean_reward is not None:
+      log_string += f"""{"Mean reward:":>{pad}} {mean_reward:.2f}\n"""
+      log_string += f"""{"Mean style reward:":>{pad}} {mean_style_reward:.2f}\n"""
+      log_string += f"""{"Mean task reward:":>{pad}} {mean_task_reward:.2f}\n"""
+      log_string += f"""{"Style / mean_reward:":>{pad}} {style_reward_fraction:.3f}\n"""
+      log_string += f"""{"Mean episode length:":>{pad}} {mean_episode_length:.2f}\n"""
     log_string += ep_string
     log_string += (
       f"""{"-" * width}\n"""
@@ -416,6 +468,62 @@ class AmpHimOnPolicyRunner:
 
     return _policy
 
+  def get_amp_reward_panel_terms(self, env_idx: int) -> list[tuple[str, list[float]]]:
+    """Weighted AMP ``style_reward`` / ``task_reward`` for the Viser bar panel.
+
+    Values match training-time ``predict_amp_reward`` (after lerp/coef).
+    Non-finite results are clamped to ``0.0``. Does not update style-reward
+    normalizer stats.
+    """
+    unwrapped = self.env.unwrapped
+    reward_manager = getattr(unwrapped, "reward_manager", None)
+    if reward_manager is None:
+      return []
+
+    obs_buf = getattr(unwrapped, "obs_buf", None)
+    if isinstance(obs_buf, dict) and "discriminator" in obs_buf:
+      amp = obs_buf["discriminator"]
+    else:
+      try:
+        obs = self.env.get_observations()
+      except Exception:
+        return []
+      if "discriminator" not in obs:
+        return []
+      amp = obs["discriminator"]
+
+    if not isinstance(amp, torch.Tensor):
+      return []
+    if amp.ndim == 2:
+      amp = amp.unsqueeze(1)
+
+    task_raw = reward_manager._reward_buf
+    try:
+      _, style, task = self.alg.discriminator.predict_amp_reward(
+        amp,
+        task_raw,
+        self.amp_state_normalizer,
+        self.amp_style_reward_normalizer,
+        update_style_normalizer=False,
+      )
+    except Exception:
+      return []
+
+    def _safe_item(tensor: torch.Tensor) -> float:
+      if tensor.ndim == 0:
+        value = float(tensor.item())
+      else:
+        idx = min(max(int(env_idx), 0), int(tensor.shape[0]) - 1)
+        value = float(tensor[idx].item())
+      if not math.isfinite(value):
+        return 0.0
+      return value
+
+    return [
+      ("style_reward", [_safe_item(style)]),
+      ("task_reward", [_safe_item(task)]),
+    ]
+
   def train_mode(self):
     self.alg.policy.train()
     self.alg.discriminator.train()
@@ -430,6 +538,15 @@ class AmpHimOnPolicyRunner:
     self.git_status_repos.append(repo_file_path)
 
   def _add_scalar(self, tag, value, step):
+    try:
+      if isinstance(value, torch.Tensor):
+        value = value.detach()
+        value = value.item() if value.numel() == 1 else float(value.mean())
+      value = float(value)
+    except (TypeError, ValueError):
+      return
+    if not math.isfinite(value):
+      value = 0.0
     if self.writer is not None:
       self.writer.add_scalar(tag, value, step)
     if self.logger_type == "wandb":

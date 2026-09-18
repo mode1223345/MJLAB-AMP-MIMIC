@@ -25,19 +25,23 @@ check: format type
 
 .PHONY: test
 test:
-	uv run pytest
+	uv run pytest -m "not golden"
 
 .PHONY: test-fast
 test-fast:
-	uv run pytest -m "not slow"
+	uv run pytest -m "not slow and not golden"
+
+.PHONY: test-golden
+test-golden:
+	uv run pytest -m golden
 
 .PHONY: test-cpu
 test-cpu:
-	FORCE_CPU=1 uv run pytest
+	FORCE_CPU=1 uv run pytest -m "not golden"
 
 .PHONY: test-cpu-fast
 test-cpu-fast:
-	FORCE_CPU=1 uv run pytest -m "not slow"
+	FORCE_CPU=1 uv run pytest -m "not slow and not golden"
 
 .PHONY: test-all
 test-all: check test

@@ -203,8 +203,11 @@ class Discriminator(nn.Module):
     task_reward,
     state_normalizer=None,
     style_reward_normalizer=None,
+    *,
+    update_style_normalizer: bool = True,
   ):
     with torch.no_grad():
+      was_training = self.training
       self.eval()
       if state_normalizer is not None:
         batch_size = state_buf.shape[0]
@@ -228,7 +231,8 @@ class Discriminator(nn.Module):
         if style_reward_normalizer is not None:
           d_clone = d.clone()
           style_reward = style_reward_normalizer.normalize_torch(d_clone, self.device)
-          style_reward_normalizer.update(d.cpu().numpy())
+          if update_style_normalizer:
+            style_reward_normalizer.update(d.cpu().numpy())
         else:
           style_reward = torch.exp(torch.tanh(0.3 * d)) - torch.exp(
             -1 * torch.ones_like(d)
@@ -237,6 +241,9 @@ class Discriminator(nn.Module):
         raise ValueError("Unexpected style reward mapping specified")
       style_reward *= (1.0 - self.reward_lerp) * self.reward_coef
       task_reward = task_reward.unsqueeze(-1) * self.reward_lerp
+      style_reward = torch.nan_to_num(style_reward, nan=0.0, posinf=0.0, neginf=0.0)
+      task_reward = torch.nan_to_num(task_reward, nan=0.0, posinf=0.0, neginf=0.0)
       reward = style_reward + task_reward
-      self.train()
-    return reward.squeeze(), style_reward.squeeze()
+      if was_training:
+        self.train()
+    return reward.squeeze(), style_reward.squeeze(), task_reward.squeeze()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -34,30 +35,117 @@ _DESIRED_FRAME_COLORS = ((1.0, 0.5, 0.5), (0.5, 1.0, 0.5), (0.5, 0.5, 1.0))
 
 
 class MotionLoader:
+  """Loads one npz motion file or a directory of them into a concatenated timeline.
+
+  Per-axis remap: when the npz carries ``joint_names``/``body_names`` keys AND
+  the requested names are given, arrays are re-indexed by name (required for
+  N3 mimic data, whose npz ordering differs from the MJCF). Otherwise the
+  legacy positional path applies (``body_indexes`` into a full-body-ordered
+  npz) — byte-identical to the single-file behavior this loader had before.
+  """
+
+  _ARRAY_KEYS = (
+    "joint_pos",
+    "joint_vel",
+    "body_pos_w",
+    "body_quat_w",
+    "body_lin_vel_w",
+    "body_ang_vel_w",
+  )
+
   def __init__(
-    self, motion_file: str, body_indexes: torch.Tensor, device: str = "cpu"
+    self,
+    motion_file: str,
+    body_indexes: torch.Tensor | None = None,
+    device: str = "cpu",
+    joint_names: tuple[str, ...] | None = None,
+    body_names: tuple[str, ...] | None = None,
   ) -> None:
-    data = np.load(motion_file)
-    self.joint_pos = torch.tensor(data["joint_pos"], dtype=torch.float32, device=device)
-    self.joint_vel = torch.tensor(data["joint_vel"], dtype=torch.float32, device=device)
-    self._body_pos_w = torch.tensor(
-      data["body_pos_w"], dtype=torch.float32, device=device
+    path = Path(motion_file)
+    if path.is_file():
+      files = [path]
+    elif path.is_dir():
+      files = sorted(path.rglob("*.npz"))
+      if not files:
+        raise FileNotFoundError(f"No motion files found in {motion_file}")
+    else:
+      raise ValueError(f"{motion_file} is neither a file nor a directory")
+
+    arrays: list[list[torch.Tensor]] = [[] for _ in self._ARRAY_KEYS]
+    lengths: list[int] = []
+    for file in files:
+      data = np.load(file)
+      remapped = self._remap_arrays(data, body_indexes, joint_names, body_names, device)
+      for lst, tensor in zip(arrays, remapped, strict=True):
+        lst.append(tensor)
+      lengths.append(remapped[0].shape[0])
+
+    (
+      self.joint_pos,
+      self.joint_vel,
+      self.body_pos_w,
+      self.body_quat_w,
+      self.body_lin_vel_w,
+      self.body_ang_vel_w,
+    ) = (torch.cat(lst, dim=0) for lst in arrays)
+    self.motion_lengths = torch.tensor(lengths, dtype=torch.long, device=device)
+    self.motion_start_steps = torch.cat(
+      [
+        torch.zeros(1, dtype=torch.long, device=device),
+        torch.cumsum(self.motion_lengths[:-1], dim=0),
+      ]
     )
-    self._body_quat_w = torch.tensor(
-      data["body_quat_w"], dtype=torch.float32, device=device
-    )
-    self._body_lin_vel_w = torch.tensor(
-      data["body_lin_vel_w"], dtype=torch.float32, device=device
-    )
-    self._body_ang_vel_w = torch.tensor(
-      data["body_ang_vel_w"], dtype=torch.float32, device=device
-    )
-    self._body_indexes = body_indexes
-    self.body_pos_w = self._body_pos_w[:, self._body_indexes]
-    self.body_quat_w = self._body_quat_w[:, self._body_indexes]
-    self.body_lin_vel_w = self._body_lin_vel_w[:, self._body_indexes]
-    self.body_ang_vel_w = self._body_ang_vel_w[:, self._body_indexes]
     self.time_step_total = self.joint_pos.shape[0]
+
+  def _remap_arrays(
+    self,
+    data: np.lib.npyio.NpzFile,
+    body_indexes: torch.Tensor | None,
+    joint_names: tuple[str, ...] | None,
+    body_names: tuple[str, ...] | None,
+    device: str,
+  ) -> tuple[torch.Tensor, ...]:
+    def _index_by_name(
+      npz_names: list[str] | None, requested: tuple[str, ...] | None
+    ) -> torch.Tensor | None:
+      if npz_names is None or requested is None:
+        return None
+      lookup = {name: i for i, name in enumerate(npz_names)}
+      try:
+        return torch.tensor(
+          [lookup[name] for name in requested], dtype=torch.long, device=device
+        )
+      except KeyError as err:
+        raise ValueError(
+          f"Motion npz is missing entry {err} among its name keys; cannot "
+          f"remap to requested names."
+        ) from err
+
+    joint_idx = _index_by_name(
+      [str(n) for n in data["joint_names"]] if "joint_names" in data.files else None,
+      joint_names,
+    )
+    body_idx = _index_by_name(
+      [str(n) for n in data["body_names"]] if "body_names" in data.files else None,
+      body_names,
+    )
+    if body_idx is None:
+      if body_indexes is None:
+        raise ValueError(
+          "MotionLoader needs either name keys in the npz plus requested "
+          "names, or positional body_indexes."
+        )
+      body_idx = body_indexes.to(device)
+
+    out: list[torch.Tensor] = []
+    for key in self._ARRAY_KEYS:
+      axis = body_idx if key.startswith("body") else joint_idx
+      array = torch.tensor(np.asarray(data[key]), dtype=torch.float32, device=device)
+      if axis is not None:
+        array = array[:, axis]
+      out.append(array)
+    # Name-less npz + name-less request: joint axis stays raw (legacy path).
+    return tuple(out)
 
 
 class MotionCommand(CommandTerm):
@@ -79,9 +167,21 @@ class MotionCommand(CommandTerm):
     )
 
     self.motion = MotionLoader(
-      self.cfg.motion_file, self.body_indexes, device=self.device
+      self.cfg.motion_file,
+      self.body_indexes,
+      device=self.device,
+      joint_names=tuple(self.robot.joint_names),
+      body_names=tuple(self.cfg.body_names),
     )
     self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+    # Per-env end of the currently assigned clip (== time_step_total for the
+    # single-clip timeline, so wrap semantics there are unchanged).
+    self.motion_end_steps = torch.full(
+      (self.num_envs,),
+      self.motion.time_step_total,
+      dtype=torch.long,
+      device=self.device,
+    )
     self.body_pos_relative_w = torch.zeros(
       self.num_envs, len(cfg.body_names), 3, device=self.device
     )
@@ -276,11 +376,31 @@ class MotionCommand(CommandTerm):
     sampled_bins = torch.multinomial(
       sampling_probabilities, len(env_ids), replacement=True
     )
-    self.time_steps[env_ids] = (
-      (sampled_bins + sample_uniform(0.0, 1.0, (len(env_ids),), device=self.device))
-      / self.bin_count
-      * (self.motion.time_step_total - 1)
-    ).long()
+    if len(self.motion.motion_lengths) == 1:
+      self.time_steps[env_ids] = (
+        (sampled_bins + sample_uniform(0.0, 1.0, (len(env_ids),), device=self.device))
+        / self.bin_count
+        * (self.motion.time_step_total - 1)
+      ).long()
+      self.motion_end_steps[env_ids] = self.motion.time_step_total
+    else:
+      # Multi-clip (Isaac semantics): pick a clip uniformly, map the sampled
+      # global bin onto a local phase within that clip, keep its end so the
+      # motion_end termination can fire at the clip boundary.
+      motion_ids = torch.randint(
+        0, len(self.motion.motion_lengths), (len(env_ids),), device=self.device
+      )
+      starts = self.motion.motion_start_steps[motion_ids]
+      lengths = self.motion.motion_lengths[motion_ids]
+      max_local_start = torch.clamp(lengths - 10, min=1)
+      local_steps = (
+        (sampled_bins.float() + torch.rand(len(env_ids), device=self.device))
+        / float(self.bin_count)
+        * max_local_start.float()
+      ).long()
+      local_steps = torch.minimum(local_steps.clamp(min=0), max_local_start)
+      self.time_steps[env_ids] = starts + local_steps
+      self.motion_end_steps[env_ids] = starts + lengths
 
     # Update metrics.
     H = -(sampling_probabilities * (sampling_probabilities + 1e-12).log()).sum()
@@ -291,9 +411,24 @@ class MotionCommand(CommandTerm):
     self.metrics["sampling_top1_bin"][:] = imax.float() / self.bin_count
 
   def _uniform_sampling(self, env_ids: torch.Tensor):
-    self.time_steps[env_ids] = torch.randint(
-      0, self.motion.time_step_total, (len(env_ids),), device=self.device
-    )
+    if len(self.motion.motion_lengths) == 1:
+      self.time_steps[env_ids] = torch.randint(
+        0, self.motion.time_step_total, (len(env_ids),), device=self.device
+      )
+    else:
+      motion_ids = torch.randint(
+        0, len(self.motion.motion_lengths), (len(env_ids),), device=self.device
+      )
+      starts = self.motion.motion_start_steps[motion_ids]
+      lengths = self.motion.motion_lengths[motion_ids]
+      max_local_start = torch.clamp(lengths - 10, min=1)
+      self.time_steps[env_ids] = (
+        starts
+        + (
+          torch.rand(len(env_ids), device=self.device) * max_local_start.float()
+        ).long()
+      )
+      self.motion_end_steps[env_ids] = starts + lengths
     self.metrics["sampling_entropy"][:] = 1.0  # Maximum entropy for uniform.
     self.metrics["sampling_top1_prob"][:] = 1.0 / self.bin_count
     self.metrics["sampling_top1_bin"][:] = 0.5  # No specific bin preference.
@@ -319,7 +454,20 @@ class MotionCommand(CommandTerm):
 
   def _resample_command(self, env_ids: torch.Tensor):
     if self.cfg.sampling_mode == "start":
-      self.time_steps[env_ids] = 0
+      if len(self.motion.motion_lengths) == 1:
+        self.time_steps[env_ids] = 0
+        self.motion_end_steps[env_ids] = self.motion.time_step_total
+      else:
+        # Play mode over a multi-clip directory: start a random clip so each
+        # episode tracks a different motion.
+        motion_ids = torch.randint(
+          0, len(self.motion.motion_lengths), (len(env_ids),), device=self.device
+        )
+        self.time_steps[env_ids] = self.motion.motion_start_steps[motion_ids]
+        self.motion_end_steps[env_ids] = (
+          self.motion.motion_start_steps[motion_ids]
+          + self.motion.motion_lengths[motion_ids]
+        )
     elif self.cfg.sampling_mode == "uniform":
       self._uniform_sampling(env_ids)
     else:
@@ -418,7 +566,7 @@ class MotionCommand(CommandTerm):
       self.time_steps += 1
     else:
       self.time_steps[env_ids] += 1
-    wrap_ids = torch.where(self.time_steps >= self.motion.time_step_total)[0]
+    wrap_ids = torch.where(self.time_steps >= self.motion_end_steps)[0]
     if wrap_ids.numel() > 0:
       self._resample_command(wrap_ids)
 
@@ -593,6 +741,20 @@ class MotionCommand(CommandTerm):
     perturbations to pose, velocity, or joint positions.
     """
     self.time_steps[env_ids] = frame
+    # Keep the per-env clip end in sync so the wrap check treats the scrubbed
+    # frame's own clip as the episode timeline (single clip: end == total).
+    clip_id = int(
+      torch.searchsorted(
+        self.motion.motion_start_steps,
+        torch.tensor(frame, device=self.device),
+        right=True,
+      )
+      - 1
+    )
+    clip_id = min(max(clip_id, 0), len(self.motion.motion_lengths) - 1)
+    self.motion_end_steps[env_ids] = (
+      self.motion.motion_start_steps[clip_id] + self.motion.motion_lengths[clip_id]
+    )
     self._write_reference_state_to_sim(
       env_ids,
       self.body_pos_w[env_ids, 0],

@@ -22,18 +22,26 @@ uv run ruff check --fix
 We've bundled common commands into a Makefile for convenience.
 
 ```sh
-make format     # Format and lint
-make type       # Type-check
-make check      # make format && make type
-make test-fast  # Run tests excluding slow ones
-make test       # Run the full test suite
-make docs       # Build documentation
+make format      # Format and lint
+make type        # Type-check
+make check       # make format && make type
+make test-fast   # Run tests excluding slow ones
+make test        # Run the full test suite (excludes the golden snapshot)
+make test-golden # Run only the golden config-equivalence snapshot
+make docs        # Build documentation
 ```
+
+`make test-golden` is opt-in: `tests/test_refactor_golden.py` pins the config
+of every registered task, so any deliberate tweak (a reward weight, a motion
+file added or removed) trips it by design. Run it when doing structural work —
+merging upstream, refactoring cfg plumbing, moving files — and review the
+`--regen` diff then.
 
 Always run `make check` before committing. This runs formatting, linting,
 and type checking. Do not commit code that fails type checking.
 
-Before creating a PR, ensure all checks pass with `make test`.
+Before creating a PR, ensure all checks pass with `make test` (plus
+`make test-golden` if the change is structural).
 
 # Commits and PRs
 

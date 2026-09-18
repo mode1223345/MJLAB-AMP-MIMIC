@@ -91,15 +91,77 @@ def _default_xml_for_joints(joint_names: list[str]) -> Path:
   return N3_XML
 
 
-def _build_model(xml_path: Path) -> mujoco.MjModel:
+def _build_model(xml_path: Path, ground_half_extent: float = 5.0) -> mujoco.MjModel:
+  """在带光照的场景里编译机器人 MJCF。
+
+  N3.xml 自身没有灯、没有天空盒、没有地面——回放器看到的整个"环境"
+  （背景、地面、光照）全部在这里补上：渐变天空（消除纯黑背景）、
+  棋盘格地面材质（judge 脚底高度），一盏投影主光 + 一盏补光。
+  ``ground_half_extent`` 是地面半边长 [m]，跟拍录像时给大一些免得
+  相机里露出地面边缘。
+  """
   spec = mujoco.MjSpec.from_file(str(xml_path))
-  # 地面，便于判断脚底高度。
+
+  sky = spec.add_texture()
+  sky.name = "replay_sky"
+  sky.type = mujoco.mjtTexture.mjTEXTURE_SKYBOX
+  sky.builtin = mujoco.mjtBuiltin.mjBUILTIN_GRADIENT
+  sky.rgb1 = (0.78, 0.84, 0.92)  # 地平线附近的雾色
+  sky.rgb2 = (0.45, 0.62, 0.85)  # 天顶
+  sky.width = 512
+  sky.height = 256
+
+  # 注意 builtin CHECKER 纹理贴在 plane 上不参与像素采样（实测整面渲染成
+  # rgb1 单色），这里按 mjlab 地形（heightfield_terrains.color_by_height）的
+  # 做法直接把棋盘像素写进 texture.data。
+  checker = spec.add_texture()
+  checker.name = "replay_ground_tex"
+  checker.type = mujoco.mjtTexture.mjTEXTURE_2D
+  checker.width = 512
+  checker.height = 512
+  tile_img = np.zeros((512, 512, 3), np.uint8)
+  tone1 = np.round(np.array((0.30, 0.34, 0.40)) * 255)
+  tone2 = np.round(np.array((0.44, 0.48, 0.54)) * 255)
+  tile_img[:256, :256] = tone1
+  tile_img[:256, 256:] = tone2
+  tile_img[256:, :256] = tone2
+  tile_img[256:, 256:] = tone1
+  checker.data = tile_img.tobytes()
+
+  ground_mat = spec.add_material()
+  ground_mat.name = "replay_ground_mat"
+  ground_mat.textures[mujoco.mjtTextureRole.mjTEXROLE_RGB] = "replay_ground_tex"
+  # texrepeat 必须 False（材质默认）：true 时纹理按世界坐标逐米重复，格子
+  # 缩到厘米级，远看全是摩尔纹。false 时一张贴图铺满整个 plane、texrepeat N
+  # 铺 N 遍 → 方格边长 ≈ 半边长/N。
+  tiles = max(2, round(ground_half_extent / 1.7))
+  ground_mat.texrepeat = (tiles, tiles)
+  ground_mat.reflectance = 0.1
+
   ground = spec.worldbody.add_geom()
   ground.name = "replay_ground"
   ground.type = mujoco.mjtGeom.mjGEOM_PLANE
-  ground.size[:] = (5.0, 5.0, 0.1)
-  ground.rgba[:] = (0.45, 0.5, 0.55, 1.0)
-  return spec.compile()
+  ground.size[:] = (ground_half_extent, ground_half_extent, 0.1)
+  ground.material = "replay_ground_mat"
+
+  key_light = spec.worldbody.add_light()
+  key_light.name = "replay_key"
+  key_light.type = mujoco.mjtLightType.mjLIGHT_DIRECTIONAL
+  key_light.pos = (2.0, -2.5, 3.0)
+  key_light.dir = (-0.5, 0.6, -1.0)
+  key_light.intensity = 1.5
+  key_light.castshadow = True
+
+  fill_light = spec.worldbody.add_light()
+  fill_light.name = "replay_fill"
+  fill_light.type = mujoco.mjtLightType.mjLIGHT_POINT
+  fill_light.pos = (-2.0, 1.5, 2.5)
+  fill_light.intensity = 0.5
+  fill_light.castshadow = False
+
+  model = spec.compile()
+  model.vis.quality.shadowsize = 2048
+  return model
 
 
 def _joint_qpos_addrs(

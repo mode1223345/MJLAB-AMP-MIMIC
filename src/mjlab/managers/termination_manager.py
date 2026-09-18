@@ -42,9 +42,13 @@ class TerminationManager(ManagerBase):
     super().__init__(env)
 
     self._term_dones = dict()
+    self._last_episode_dones = dict()
     for term_name in self._term_names:
       self._term_dones[term_name] = torch.zeros(
         self.num_envs, device=self.device, dtype=torch.bool
+      )
+      self._last_episode_dones[term_name] = torch.zeros_like(
+        self._term_dones[term_name]
       )
     self._truncated_buf = torch.zeros(
       self.num_envs, device=self.device, dtype=torch.bool
@@ -85,16 +89,52 @@ class TerminationManager(ManagerBase):
 
   # Methods.
 
-  def reset(
-    self, env_ids: torch.Tensor | slice | None = None
-  ) -> dict[str, torch.Tensor]:
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> dict[str, float]:
     if env_ids is None:
       env_ids = slice(None)
-    extras = {}
+    # Snapshot the reasons for the episodes that are ending now. This runs for
+    # the envs that actually reset, so an env whose termination was suppressed
+    # (e.g. by ``DelayedTerminationManager``) keeps its previous episode's
+    # reasons instead of recording a reset that never happened.
     for key in self._term_dones.keys():
-      extras["Episode_Termination/" + key] = torch.count_nonzero(
-        self._term_dones[key][env_ids]
-      ).item()
+      self._last_episode_dones[key][env_ids] = self._term_dones[key][env_ids]
+    # Share of the episodes that ended in this reset call, as a fraction
+    # (Isaac Lab's ``Episode_Termination`` convention). In training every reset
+    # ends an episode, so the denominator is the number of episodes just ended.
+    # Terms are not mutually exclusive -- a robot on the ground trips the height
+    # and the tilt checks in the same step -- so two flavors are logged:
+    # ``Episode_Termination_any/*`` is the overlapping share (may sum past 1),
+    # while ``Episode_Termination/*`` attributes each episode to a single
+    # reason by priority (time outs first, then declaration order), so those
+    # sum to exactly 1 and read as "what ended the episode".
+    order = self._priority_ordered_names()
+    extras: dict[str, float] = {}
+    if order:
+      num_resets = self.num_envs if isinstance(env_ids, slice) else int(env_ids.numel())
+      fired = {key: self._term_dones[key][env_ids] for key in order}
+      exclusive = {}
+      unassigned = torch.zeros_like(self._truncated_buf[env_ids])
+      for key in order:
+        exclusive[key] = fired[key] & ~unassigned
+        unassigned |= fired[key]
+      # Stack everything and sync once, so a reset step costs a single .tolist().
+      shares = (
+        torch.stack(
+          [
+            torch.stack(
+              [
+                torch.count_nonzero(fired[key]).float(),
+                torch.count_nonzero(exclusive[key]).float(),
+              ]
+            )
+            for key in order
+          ]
+        )
+        / max(num_resets, 1)
+      ).tolist()
+      for key, (any_share, exclusive_share) in zip(order, shares, strict=True):
+        extras["Episode_Termination_any/" + key] = any_share
+        extras["Episode_Termination/" + key] = exclusive_share
     for term_cfg in self._class_term_cfgs:
       term_cfg.func.reset(env_ids=env_ids)
     return extras
@@ -115,10 +155,26 @@ class TerminationManager(ManagerBase):
   def get_term(self, name: str) -> torch.Tensor:
     return self._term_dones[name]
 
+  def get_last_episode_term(self, name: str) -> torch.Tensor:
+    """Per-env bool mask of whether ``name`` ended the last episode."""
+    return self._last_episode_dones[name]
+
   def get_term_cfg(self, term_name: str) -> TerminationTermCfg:
     if term_name not in self._term_names:
       raise ValueError(f"Term '{term_name}' not found in active terms.")
     return self._term_cfgs[self._term_names.index(term_name)]
+
+  def _priority_ordered_names(self) -> list[str]:
+    """Term names for exclusive attribution: time outs first, then decl order.
+
+    An episode that trips several terms at once is credited to the first name
+    in this order, so the per-term shares in ``reset`` add up to 1. Time outs
+    lead because reaching the horizon is not a fall.
+    """
+    pairs = list(zip(self._term_names, self._term_cfgs, strict=False))
+    return [name for name, cfg in pairs if cfg.time_out] + [
+      name for name, cfg in pairs if not cfg.time_out
+    ]
 
   def get_active_iterable_terms(
     self, env_idx: int

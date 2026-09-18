@@ -11,7 +11,7 @@ import viser
 
 # Match Labubu / F5 AMP foot_friction DR targets (optional per pattern).
 _DEFAULT_FOOT_GEOM_PATTERNS: tuple[str, ...] = (
-  ".*_foot_collision",
+  ".*_foot.*_collision",
   ".*_ankle_roll_collision",
 )
 

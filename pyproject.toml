@@ -148,6 +148,7 @@ exclude = ["src/mjlab/utils/lab_api", "typings"]
 [tool.pytest.ini_options]
 markers = [
   "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "golden: config-equivalence golden (deselect by default; run with '-m golden')",
 ]
 addopts = "--strict-markers"
 filterwarnings = [

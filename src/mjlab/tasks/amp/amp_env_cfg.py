@@ -44,6 +44,7 @@ from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.tasks.amp import mdp
 from mjlab.tasks.amp.mdp.commands import UniformVelocityWithZeroCommandCfg
 from mjlab.terrains import TerrainEntityCfg
+from mjlab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
@@ -71,6 +72,15 @@ class AmpCommandSpec:
   lin_vel_y: tuple[float, float]
   ang_vel_z: tuple[float, float]
   zero_prob: tuple[float, float, float]
+  # Isaac-N3 mode sampling (overrides zero_prob when set): probabilities of
+  # (forward, backward, lateral, pure-turn); one axis active per resample.
+  command_mode_prob: tuple[float, float, float, float] | None = None
+  # Axis-mode sampling (overrides zero_prob when set): P(single active axis)
+  # / P(two active axes); remainder is three-axis. axis_weights orders axis
+  # importance (vx, vy, wz).
+  single_axis_prob: float | None = None
+  double_axis_prob: float | None = None
+  axis_weights: tuple[float, float, float] = (0.5, 0.3, 0.2)
 
 
 @dataclass(frozen=True)
@@ -91,13 +101,36 @@ class AmpRobotSpec:
   mass_range: tuple[float, float]
   push_velocity_range: Mapping[str, tuple[float, float]]
   rewards_factory: Callable[[], dict[str, RewardTermCfg]]
+  # Per-episode constant IMU bias stds (mounting misalignment + gyro drift).
+  # None falls back to plain per-frame noise without bias. Defaults are None:
+  # 0.03/0.15 turned out to be a ~10x unit error (0.15 on the projected-gravity
+  # unit vector is a constant ~8.6 deg tilt, not the claimed 0.9 deg) and the
+  # proven reference config has no such randomization. Opt in per task.
+  imu_ang_vel_bias_std: float | None = None
+  imu_orientation_bias_std: float | None = None
+  # Joint velocity limits [rad/s] keyed by joint-name regex tuples. Wired as
+  # per-control-step clamp events (motor rated-speed envelope). None disables.
+  joint_velocity_limits: Mapping[tuple[str, ...], float] | None = None
+  # Fall-recovery training (delayed termination + recovery-frame resets).
+  # recovery_motion_dir enables the whole mechanism; delay envs get their fall
+  # terminations suppressed for max_delay_steps and are re-initialized from
+  # the recovery motion set. Set to None for pure locomotion.
+  recovery_motion_dir: tuple[str, ...] | None = None
+  delay_reset_env_ratio: float = 0.3
+  max_delay_steps: int = 250
+  recovery_height_std: float = 0.3
+  recovery_height_reward_scale: float = 3.5
+  terminated_penalty_weight: float = -50.0
+  # Kept small: the startup z-lift precompute loops over every preloaded
+  # recovery frame once (~1 s per 10k frames on CPU).
+  recovery_num_preload_transitions: int = 20_000
   with_height_scan: bool = False
   motion_required: bool = True  # False reproduces empty-dir-returns-empty.
   amp_horizon: int = 4
   reset_prob_rsi: float = 0.5
   reset_joint_pos_range: tuple[float, float] = (-0.2, 0.2)
   reset_joint_vel_range: tuple[float, float] = (-1.0, 1.0)
-  friction_geom_pattern: str = ".*_foot_collision"
+  friction_geom_pattern: str = ".*_foot.*_collision"
   friction_range: tuple[float, float] = (0.3, 1.6)
   pd_gain_range: tuple[float, float] = (0.8, 1.2)
   push_interval_s: tuple[float, float] = (3.0, 6.0)
@@ -151,6 +184,24 @@ def _feet_ground_cfg(foot_body_regex: str) -> ContactSensorCfg:
   )
 
 
+def _imu_noise(
+  bias_std: float | None, n_min: float, n_max: float
+) -> Unoise | NoiseModelWithAdditiveBiasCfg:
+  """Per-frame noise, optionally with a per-episode constant IMU bias.
+
+  The bias approximates a small fixed IMU mounting rotation (orientation
+  error ~ |g| * sin(angle), e.g. std 0.15 ~= 0.9 deg) sampled per env and
+  held constant for the episode, on top of the usual per-frame jitter.
+  """
+  per_frame = Unoise(n_min=n_min, n_max=n_max)
+  if bias_std is None:
+    return per_frame
+  return NoiseModelWithAdditiveBiasCfg(
+    noise_cfg=per_frame,
+    bias_noise_cfg=GaussianNoiseCfg(std=bias_std),
+  )
+
+
 def make_amp_flat_env_cfg(
   spec: AmpRobotSpec, play: bool = False
 ) -> ManagerBasedRlEnvCfg:
@@ -170,18 +221,18 @@ def make_amp_flat_env_cfg(
     ),
     "base_ang_vel": ObservationTermCfg(
       func=mdp.base_ang_vel,
-      noise=Unoise(n_min=-0.2, n_max=0.2),
+      noise=_imu_noise(spec.imu_ang_vel_bias_std, -0.2, 0.2),
     ),
   }
   if spec.orientation_term == "euler_angles":
     actor_terms["euler_angles"] = ObservationTermCfg(
       func=mdp.euler_angles,
-      noise=Unoise(n_min=-0.05, n_max=0.05),
+      noise=_imu_noise(spec.imu_orientation_bias_std, -0.05, 0.05),
     )
   else:
     actor_terms["projected_gravity"] = ObservationTermCfg(
       func=mdp.projected_gravity,
-      noise=Unoise(n_min=-0.05, n_max=0.05),
+      noise=_imu_noise(spec.imu_orientation_bias_std, -0.05, 0.05),
     )
   actor_terms["joint_pos"] = ObservationTermCfg(
     func=mdp.joint_pos_rel,
@@ -273,6 +324,10 @@ def make_amp_flat_env_cfg(
         lin_vel_y=cmd.lin_vel_y,
         ang_vel_z=cmd.ang_vel_z,
         zero_prob=cmd.zero_prob,
+        command_mode_prob=cmd.command_mode_prob,
+        single_axis_prob=cmd.single_axis_prob,
+        double_axis_prob=cmd.double_axis_prob,
+        axis_weights=cmd.axis_weights,
       ),
     )
   }
@@ -324,6 +379,7 @@ def make_amp_flat_env_cfg(
       params={
         "reference_state_initialization": True,
         "prob_rsi": spec.reset_prob_rsi,
+        "use_recovery_for_delay_envs": spec.recovery_motion_dir is not None,
         "root_pos_range": dict(_ROOT_POS_RANGE),
         "root_vel_range": dict(_ROOT_VEL_RANGE),
         "joint_pos_range": spec.reset_joint_pos_range,
@@ -366,15 +422,56 @@ def make_amp_flat_env_cfg(
     interval_range_s=spec.push_interval_s,
     params={"velocity_range": dict(spec.push_velocity_range)},
   )
+  if spec.joint_velocity_limits:
+    for index, (patterns, limit) in enumerate(spec.joint_velocity_limits.items()):
+      events[f"clamp_joint_velocity_{index}"] = EventTermCfg(
+        func=mdp.clamp_joint_velocity,
+        mode="step",
+        params={
+          "asset_cfg": SceneEntityCfg("robot", joint_names=patterns),
+          "velocity_limit": limit,
+        },
+      )
+
+  delay_ratio = spec.delay_reset_env_ratio
+  if spec.recovery_motion_dir is not None:
+    # NOTE: play keeps the training ratio. Forcing 1.0 here made every play
+    # env a delay env, zeroing all delay-masked rewards in the viewer.
+    events["install_delayed_recovery"] = EventTermCfg(
+      func=mdp.install_delayed_recovery,
+      mode="startup",
+      params={
+        "recovery_motion_files": _default_amp_motion_files(
+          spec.recovery_motion_dir, required=True
+        ),
+        "delay_reset_env_ratio": delay_ratio,
+        "max_delay_steps": spec.max_delay_steps,
+        "reference_observation_horizon": spec.amp_horizon,
+        "num_preload_transitions": spec.recovery_num_preload_transitions,
+      },
+    )
 
   terminations = {
     "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
   }
   if spec.fall_down_height is not None:
-    terminations["fall_down"] = TerminationTermCfg(
-      func=envs_mdp.root_height_below_minimum,
-      params={"minimum_height": spec.fall_down_height},
-    )
+    if spec.with_height_scan:
+      # Terrain-relative (Isaac N3 [ADD 2026-09-04]): the absolute check goes
+      # inert/false-fires on elevated or sloped terrain; with a height scan,
+      # measure the root against the ground directly under it. The function
+      # itself falls back to the absolute check when the sensor is missing.
+      terminations["fall_down"] = TerminationTermCfg(
+        func=mdp.terminations.root_height_below_terrain,
+        params={
+          "minimum_height": spec.fall_down_height,
+          "sensor_name": "terrain_scan",
+        },
+      )
+    else:
+      terminations["fall_down"] = TerminationTermCfg(
+        func=envs_mdp.root_height_below_minimum,
+        params={"minimum_height": spec.fall_down_height},
+      )
   terminations["bad_orientation"] = TerminationTermCfg(
     func=mdp.bad_orientation, params={"limit_angle": spec.bad_orientation_limit}
   )
@@ -382,6 +479,22 @@ def make_amp_flat_env_cfg(
   sensors: tuple = (feet := _feet_ground_cfg(spec.foot_body_regex),)
   if spec.with_height_scan:
     sensors = (terrain_scan, feet)
+
+  rewards = spec.rewards_factory()
+  if spec.recovery_motion_dir is not None:
+    # Recovery learning signals (delay envs only for the height term).
+    rewards["track_root_height"] = RewardTermCfg(
+      func=mdp.track_root_height,
+      weight=1.0,
+      params={
+        "std": spec.recovery_height_std,
+        "delay_env_rew_ratio": spec.recovery_height_reward_scale,
+      },
+    )
+    rewards["is_terminated"] = RewardTermCfg(
+      func=mdp.is_terminated,
+      weight=spec.terminated_penalty_weight,
+    )
 
   cfg = ManagerBasedRlEnvCfg(
     scene=SceneCfg(
@@ -395,7 +508,7 @@ def make_amp_flat_env_cfg(
     actions=actions,
     commands=commands,
     events=events,
-    rewards=spec.rewards_factory(),
+    rewards=rewards,
     terminations=terminations,
     curriculum={},
     viewer=ViewerConfig(

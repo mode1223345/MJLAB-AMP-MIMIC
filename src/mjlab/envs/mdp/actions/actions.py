@@ -174,7 +174,13 @@ class BaseAction(ActionTerm):
 
 @dataclass(kw_only=True)
 class JointPositionActionCfg(BaseActionCfg):
-  """Configuration for joint position control."""
+  """Configuration for joint position control.
+
+  Actuation latency is NOT configured here: builtin actuators carry their own
+  delay (``delay_min_lag``/``delay_max_lag`` on the actuator cfg, applied to
+  the control targets via a shared ``DelayBuffer``) — see
+  ``mjlab.actuator.builtin_group``.
+  """
 
   use_default_offset: bool = True
 

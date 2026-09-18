@@ -76,16 +76,136 @@ class UniformVelocityWithZeroCommand(CommandTerm):
     self.vel_command_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
     self.vel_command_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
     self.vel_command_b[env_ids, 2] = r.uniform_(*self.cfg.ranges.ang_vel_z)
-    self.is_zero_vel_x_env[env_ids] = (
-      r.uniform_(0.0, 1.0) <= self.cfg.ranges.zero_prob[0]
-    )
-    self.is_zero_vel_y_env[env_ids] = (
-      r.uniform_(0.0, 1.0) <= self.cfg.ranges.zero_prob[1]
-    )
-    self.is_zero_vel_yaw_env[env_ids] = (
-      r.uniform_(0.0, 1.0) <= self.cfg.ranges.zero_prob[2]
-    )
+    if self.cfg.ranges.command_mode_prob is not None:
+      self._resample_command_mode(env_ids)
+    elif self.cfg.ranges.single_axis_prob is not None:
+      self._resample_axis_mode_masks(env_ids, r)
+    else:
+      self.is_zero_vel_x_env[env_ids] = (
+        r.uniform_(0.0, 1.0) <= self.cfg.ranges.zero_prob[0]
+      )
+      self.is_zero_vel_y_env[env_ids] = (
+        r.uniform_(0.0, 1.0) <= self.cfg.ranges.zero_prob[1]
+      )
+      self.is_zero_vel_yaw_env[env_ids] = (
+        r.uniform_(0.0, 1.0) <= self.cfg.ranges.zero_prob[2]
+      )
     self.is_standing_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_standing_envs
+
+  def _resample_command_mode(self, env_ids: torch.Tensor) -> None:
+    """Isaac-N3 mode sampling: activate exactly one command axis.
+
+    Modes: 0 forward (vx > 0 part of the range), 1 backward (vx < 0 part),
+    2 lateral (|vy| in [0.05, max|vy|], random sign), 3 pure turn (same for
+    wz). Zero flags are kept consistent for downstream gating.
+    """
+    ranges = self.cfg.ranges
+    assert ranges.command_mode_prob is not None
+    probs = torch.tensor(
+      ranges.command_mode_prob, dtype=torch.float, device=self.device
+    )
+    probs = probs / torch.sum(probs)
+    modes = torch.multinomial(probs, len(env_ids), replacement=True)
+
+    self.vel_command_b[env_ids, :] = 0.0
+    self.is_zero_vel_x_env[env_ids] = True
+    self.is_zero_vel_y_env[env_ids] = True
+    self.is_zero_vel_yaw_env[env_ids] = True
+
+    forward_ids = env_ids[modes == 0]
+    if len(forward_ids) > 0:
+      x_min = max(0.0, ranges.lin_vel_x[0])
+      x_max = max(x_min, ranges.lin_vel_x[1])
+      self.vel_command_b[forward_ids, 0] = torch.empty(
+        len(forward_ids), device=self.device
+      ).uniform_(x_min, x_max)
+      self.is_zero_vel_x_env[forward_ids] = False
+
+    backward_ids = env_ids[modes == 1]
+    if len(backward_ids) > 0:
+      x_min = min(ranges.lin_vel_x[0], 0.0)
+      x_max = min(ranges.lin_vel_x[1], 0.0)
+      self.vel_command_b[backward_ids, 0] = torch.empty(
+        len(backward_ids), device=self.device
+      ).uniform_(x_min, x_max)
+      self.is_zero_vel_x_env[backward_ids] = False
+
+    lateral_ids = env_ids[modes == 2]
+    if len(lateral_ids) > 0:
+      y_abs_max = max(abs(ranges.lin_vel_y[0]), abs(ranges.lin_vel_y[1]))
+      y_mag = torch.empty(len(lateral_ids), device=self.device).uniform_(
+        0.05, y_abs_max
+      )
+      y_sign = torch.where(
+        torch.empty(len(lateral_ids), device=self.device).uniform_(0.0, 1.0) < 0.5,
+        -torch.ones(len(lateral_ids), device=self.device),
+        torch.ones(len(lateral_ids), device=self.device),
+      )
+      self.vel_command_b[lateral_ids, 1] = y_mag * y_sign
+      self.is_zero_vel_y_env[lateral_ids] = False
+
+    turn_ids = env_ids[modes == 3]
+    if len(turn_ids) > 0:
+      yaw_abs_max = max(abs(ranges.ang_vel_z[0]), abs(ranges.ang_vel_z[1]))
+      yaw_mag = torch.empty(len(turn_ids), device=self.device).uniform_(
+        0.05, yaw_abs_max
+      )
+      yaw_sign = torch.where(
+        torch.empty(len(turn_ids), device=self.device).uniform_(0.0, 1.0) < 0.5,
+        -torch.ones(len(turn_ids), device=self.device),
+        torch.ones(len(turn_ids), device=self.device),
+      )
+      self.vel_command_b[turn_ids, 2] = yaw_mag * yaw_sign
+      self.is_zero_vel_yaw_env[turn_ids] = False
+
+  def _resample_axis_mode_masks(self, env_ids: torch.Tensor, r: torch.Tensor) -> None:
+    """Sample axis-activation modes: single > double > triple (AMP-aligned).
+
+    AMP expert clips are axis-aligned (pure forward/lateral/turn), so
+    single-axis commands get the highest mass and three-axis compounds the
+    lowest. Axis selection within a mode follows ``axis_weights`` (the most
+    important axis is activated most often; in double mode the least
+    important axis is excluded most often).
+    """
+    n = len(env_ids)
+    ranges = self.cfg.ranges
+    assert ranges.single_axis_prob is not None
+    p1 = ranges.single_axis_prob
+    p2 = ranges.double_axis_prob or 0.0
+    assert 0.0 <= p1 and 0.0 <= p2 and p1 + p2 <= 1.0, (
+      f"single_axis_prob ({p1}) + double_axis_prob ({p2}) must be in [0, 1]"
+    )
+    u = r.uniform_(0.0, 1.0)
+    single = u < p1
+    double = (u >= p1) & (u < p1 + p2)
+
+    weights = r.new_tensor(ranges.axis_weights)
+    cum = torch.cumsum(weights, dim=0)
+    pick_u = torch.empty((n, 1), device=self.device).uniform_(0.0, 1.0)
+    axis_pick = (pick_u >= cum[None, :]).sum(dim=1)
+    excl_weights = 1.0 - weights
+    excl_weights = excl_weights / excl_weights.sum()
+    excl_cum = torch.cumsum(excl_weights, dim=0)
+    excl_u = torch.empty((n, 1), device=self.device).uniform_(0.0, 1.0)
+    axis_excluded = (excl_u >= excl_cum[None, :]).sum(dim=1)
+
+    zero_x = torch.zeros(n, dtype=torch.bool, device=self.device)
+    zero_y = torch.zeros_like(zero_x)
+    zero_z = torch.zeros_like(zero_x)
+    for axis in range(3):
+      # Single mode: only the picked axis stays active.
+      m = single & (axis_pick == axis)
+      zero_x |= m & (axis != 0)
+      zero_y |= m & (axis != 1)
+      zero_z |= m & (axis != 2)
+      # Double mode: only the excluded axis is zeroed.
+      m = double & (axis_excluded == axis)
+      zero_x |= m & (axis == 0)
+      zero_y |= m & (axis == 1)
+      zero_z |= m & (axis == 2)
+    self.is_zero_vel_x_env[env_ids] = zero_x
+    self.is_zero_vel_y_env[env_ids] = zero_y
+    self.is_zero_vel_yaw_env[env_ids] = zero_z
 
   def _update_command(self, env_ids: torch.Tensor | None = None) -> None:
     # Pure function of the masks set at resample time; refreshing all envs is
@@ -323,6 +443,20 @@ class UniformVelocityWithZeroCommandCfg(CommandTermCfg):
     lin_vel_y: tuple[float, float]
     ang_vel_z: tuple[float, float]
     zero_prob: tuple[float, float, float] = (0.2, 0.2, 0.2)
+    # Isaac-N3 mode sampling (overrides zero_prob when set): probabilities of
+    # (forward, backward, lateral, pure-turn). Each resample activates exactly
+    # one axis — forward samples vx from the positive part of lin_vel_x,
+    # backward from the negative part, lateral/turn sample the magnitude in
+    # [0.05, |range max|] with random sign.
+    command_mode_prob: tuple[float, float, float, float] | None = None
+    # Axis-mode sampling (overrides zero_prob when single_axis_prob is set):
+    # P(exactly one active axis) / P(exactly two). The remainder is
+    # three-axis. Aligned with axis-pure AMP expert data: single > double
+    # > triple. axis_weights picks which axis activates (most important
+    # first); the least important axis is excluded most often in double mode.
+    single_axis_prob: float | None = None
+    double_axis_prob: float | None = None
+    axis_weights: tuple[float, float, float] = (0.5, 0.3, 0.2)
 
   ranges: Ranges
 

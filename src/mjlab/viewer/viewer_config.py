@@ -39,10 +39,11 @@ class ViewerConfig:
   """Number of neighboring environments to render around env_idx."""
 
   reward_bar_max_terms: int = 20
-  """Maximum number of reward terms shown in the Viser reward bar panel.
+  """Lower bound for the Viser reward bar panel's term limit.
 
-  Terms beyond this limit are dropped (with a warning). Raise it for
-  environments with many reward terms."""
+  The overlay passes ``max(configured, len(active_terms))`` to the panel, so
+  every active reward term is always shown and this value alone can never
+  cause truncation. The AMP style/task entries count as terms too."""
 
   # Camera placement.
   distance: float = 5.0
