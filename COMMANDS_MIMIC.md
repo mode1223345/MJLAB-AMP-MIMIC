@@ -27,7 +27,7 @@ uv run python scripts/tools/validate_mimic_npz.py \
   --npz "motions/mimic_data/N3/npz_baselink/n3_侧空翻_30fps.npz"
 
 # 校验整个动作库（32 个逐个查）
-uv run python scripts/tools/validate_mimic_npz.py --npz motions/mimic_data/N3/npz
+uv run python scripts/tools/validate_mimic_npz.py --npz motions/mimic_data/N3/npz_baselink
 
 # 列出全部动作（肉眼挑）
 ls motions/mimic_data/N3/npz_baselink/
@@ -51,7 +51,7 @@ CUDA_VISIBLE_DEVICES=0 uv run train Mjlab-Tracking-Flat-N3-Mimic \
 
 # 多片段混训（可选；motion-file 指目录 = 库内全部 32 个拼接训练，二选一的工作流）
 uv run train Mjlab-Tracking-Flat-N3-Mimic \
-  --env.commands.motion.motion-file motions/mimic_data/N3/npz \
+  --env.commands.motion.motion-file motions/mimic_data/N3/npz_baselink \
   --agent.run-name all32
 ```
 

@@ -8,7 +8,7 @@ asset_zoo 的 N3.xml（最新机器人数据）做 FK——anchor 即 CSV root =
 
   uv run python scripts/tools/csv_to_mimic_npz.py \
     --csv "/path/to/motion-csv/高动态/n3" \
-    --library motions/mimic_data/N3/npz
+    --library motions/mimic_data/N3/npz_baselink
 """
 
 from __future__ import annotations

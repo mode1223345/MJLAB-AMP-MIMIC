@@ -6,7 +6,7 @@ N3.xml 本身无灯无天空无地面）与跟拍相机：自由相机逐帧 loo
 重排到 MJCF 顺序（与 MotionLoader 同规则）。Example::
 
   uv run python scripts/tools/record_mimic_npz_videos.py \
-    --npz motions/mimic_data/N3/npz
+    --npz motions/mimic_data/N3/npz_baselink
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@
 anchor 四元数 = waist_yaw_link 姿态去掉腰部偏航关节旋转后的 base 系姿态，wxyz）。
 npz 的 joint/body 轴保持自身名字顺序原样输出（与部署文件一致，不做 MJCF 重排）::
 
-  uv run python scripts/tools/npz_to_baselink_json.py --npz motions/mimic_data/N3/npz
+  uv run python scripts/tools/npz_to_baselink_json.py --npz motions/mimic_data/N3/npz_baselink
 """
 
 from __future__ import annotations
