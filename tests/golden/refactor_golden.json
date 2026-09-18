@@ -5743,7 +5743,7 @@
        1000000000.0
       ],
       "debug_vis": false,
-      "motion_file": "motions/mimic_data/N3/npz/n3_\u4fa7\u7a7a\u7ffb_30fps.npz",
+      "motion_file": "motions/mimic_data/N3/npz_baselink/n3_\u4fa7\u7a7a\u7ffb_30fps.npz",
       "anchor_body_name": "base_link",
       "body_names": [
        "base_link",
@@ -7498,7 +7498,7 @@
        1000000000.0
       ],
       "debug_vis": true,
-      "motion_file": "motions/mimic_data/N3/npz/n3_\u4fa7\u7a7a\u7ffb_30fps.npz",
+      "motion_file": "motions/mimic_data/N3/npz_baselink/n3_\u4fa7\u7a7a\u7ffb_30fps.npz",
       "anchor_body_name": "base_link",
       "body_names": [
        "base_link",

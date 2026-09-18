@@ -30,7 +30,7 @@ class RegenerateConfig:
   """原始 CSV 文件或目录（目录 = 全部 *.csv 逐个转）。"""
 
   output_dir: str = "motions/mimic_data/N3/npz_baselink"
-  library: str = "motions/mimic_data/N3/npz"
+  library: str = "motions/mimic_data/N3/npz_baselink"
   """现有 npz 动作库（只读，用来照抄 joint/body 名字顺序）。"""
 
   fps: int = 50

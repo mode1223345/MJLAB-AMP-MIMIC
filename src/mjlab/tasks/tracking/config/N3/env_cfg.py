@@ -93,10 +93,12 @@ ARM_JOINT_NAMES = (
 )
 
 # 动作库：32 个厂商高动态动作（文件名里的 30fps 是历史命名，数据实为 50fps=控制频率）。
-# 训练默认单动作（Isaac 端同款用法，每个动作单独训一个策略），换动作用
+# npz_baselink = 从原始 CSV 用本地 N3.xml 重新 FK 生成（anchor=base_link，与部署
+# json 同源，csv_to_mimic_npz.py）；旧的 Isaac 再处理版 npz 已删。训练默认单动作
+# （Isaac 端同款用法，每个动作单独训一个策略），换动作用
 # --env.commands.motion.motion-file 覆盖；指向 N3_MIMIC_MOTION_DIR 目录则是
 # 多片段混训（MotionLoader 逐文件按名字重排后拼接）。命令在仓库根目录执行。
-N3_MIMIC_MOTION_DIR = "motions/mimic_data/N3/npz"
+N3_MIMIC_MOTION_DIR = "motions/mimic_data/N3/npz_baselink"
 N3_MIMIC_MOTION_FILE = f"{N3_MIMIC_MOTION_DIR}/n3_侧空翻_30fps.npz"
 
 
